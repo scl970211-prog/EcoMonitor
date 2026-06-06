@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtualenv
+venv/
+env/
+.env
+.env.*
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini

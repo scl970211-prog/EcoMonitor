@@ -1,0 +1,52 @@
+{
+  "auto_login_enabled": true,
+  "connection": {
+    "auto_connect": false
+  },
+  "device": {
+    "ip": "",
+    "port": 8000,
+    "http_port": 80,
+    "username": "admin",
+    "password": "",
+    "auto_connect": false
+  },
+  "scanner": {
+    "auto_range": true,
+    "use_arp": true,
+    "use_ping": true,
+    "use_tcp": true,
+    "timeout": 1.0,
+    "selected_cidr": ""
+  },
+  "preview": {
+    "default_layout": 4,
+    "saved_bindings": [],
+    "default_channel": 1,
+    "auto_play": true,
+    "auto_play_all": false,
+    "grid_layout": "2x2",
+    "restore_on_connect": true,
+    "device_layouts": {}
+  },
+  "download": {
+    "output_dir": "",
+    "concurrent": 2,
+    "auto_convert": true,
+    "delete_after_convert": false
+  },
+  "ui": {
+    "device_scan_column_widths": [
+      0.15,
+      0.2,
+      0.25,
+      0.12,
+      0.18,
+      0.1
+    ],
+    "window_width": 1400,
+    "window_height": 900,
+    "log_level": "INFO",
+    "main_splitter_state": ""
+  }
+}
