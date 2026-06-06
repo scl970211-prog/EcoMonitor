@@ -3,8 +3,10 @@
 一款综合性的视频设备管理与网络运维工具，支持设备发现、视频预览、录像下载、网络诊断等功能。
 
 ## 下载使用
-1、最新安装包请前往 Releases 下载。
-2、直接下载链接：https://github.com/scl970211-prog/EcoMonitor/releases
+
+1. 最新安装包请前往 Releases 下载。
+2. 直接下载链接：https://github.com/scl970211-prog/EcoMonitor/releases
+
 
 ## 功能特性
 
