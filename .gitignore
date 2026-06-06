@@ -2,34 +2,25 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-*.egg-info/
-dist/
-build/main/
-*.egg
-*.manifest
-*.spec
 
-# 虚拟环境
+# Virtualenv
 venv/
+env/
 .env
-.venv
+.env.*
 
-# IDE / 工具
-.codex/
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# IDE / 编辑器
 .vscode/
 .idea/
-*.swp
 
-# 用户数据 / 日志
-data/config.json
+# Logs
 *.log
-logs/
 
-# 打包产物（保留 spec 和脚本）
-!/build/main.spec
-!/build/build.bat
-!/build/post_build_cleanup.py
-
-# 二进制分发
-installer/redist/
+# OS
+Thumbs.db
+Desktop.ini
