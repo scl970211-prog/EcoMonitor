@@ -18,34 +18,14 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QObject
 
 from ...utils.config import get_config
+from ..theme import set_text_style
+from ...core.constants import DSCP_NAMES
 
 logger = logging.getLogger(__name__)
 
-# DSCP 值对照表
-DSCP_NAMES = {
-    0: "CS0 / BE (默认)",
-    8: "CS1",
-    10: "AF11",
-    12: "AF12",
-    14: "AF13",
-    16: "CS2",
-    18: "AF21",
-    20: "AF22",
-    22: "AF23",
-    24: "CS3",
-    26: "AF31",
-    28: "AF32",
-    30: "AF33",
-    32: "CS4",
-    34: "AF41",
-    36: "AF42",
-    38: "AF43",
-    40: "CS5",
-    44: "VA (语音准入)",
-    46: "EF (加速转发)",
-    48: "CS6",
-    56: "CS7",
-}
+# 抑制 scapy 在未安装 Npcap 时反复打印的 WinPcap 弃用警告
+# （项目已迁移到 Npcap，该警告对用户无意义）
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 
 
 class _Signaler(QObject):
@@ -122,13 +102,13 @@ class TrafficAnalysisTab(QWidget):
         vlayout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         warning_label = QLabel(
-            "⚠️ 流量分析功能需要 scapy 库\n\n"
+            "流量分析功能需要 scapy 库\n\n"
             "请安装以下依赖:\n"
             "  pip install scapy\n\n"
             "Windows 用户还需安装 Npcap:\n"
             "  https://npcap.com/#download"
         )
-        warning_label.setStyleSheet("font-size: 14px; color: #666;")
+        set_text_style(warning_label, "secondary", size="14px")
         warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         vlayout.addWidget(warning_label)
         
@@ -414,16 +394,16 @@ class TrafficAnalysisTab(QWidget):
             
             # 风险标记
             if dscp not in DSCP_NAMES:
-                risk = QTableWidgetItem("⚠️ 非标准DSCP")
+                risk = QTableWidgetItem("非标准DSCP")
                 risk.setForeground(Qt.GlobalColor.red)
             elif dscp == 46:
-                risk = QTableWidgetItem("🟢 语音优先")
+                risk = QTableWidgetItem("语音优先")
                 risk.setForeground(Qt.GlobalColor.darkGreen)
             elif dscp >= 40:
-                risk = QTableWidgetItem("🔵 高优先级")
+                risk = QTableWidgetItem("高优先级")
                 risk.setForeground(Qt.GlobalColor.blue)
             else:
-                risk = QTableWidgetItem("🟡 普通")
+                risk = QTableWidgetItem("普通")
             self.dscp_table.setItem(row, 4, risk)
     
     def _on_stop_capture(self):

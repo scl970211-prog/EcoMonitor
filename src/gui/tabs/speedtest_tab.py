@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-宽带测速标签页 - 参考 speedtest.cn / speedtest.net 专业测速
+宽带测速标签页 - 专业仪表盘版
 基于 speedtest.net Ookla 测速节点实现
 """
 
@@ -18,22 +18,35 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from enum import Enum
 
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
-    QTextEdit, QVBoxLayout, QWidget,
+    QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
+    QPushButton, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
+from .. import icons
+from ..icons import Icon, set_button_icon
+from ..theme import get_theme_manager, set_status_style
+from ..widgets.speed_chart import SpeedChartWidget
+from ..widgets.speed_gauge import SpeedGauge, SpeedPhase
+
+# 取消实时绘图：禁用 matplotlib 集成（按需可恢复）
+FigureCanvas = None
+plt = None
+_HAS_MPL = False
 logger = logging.getLogger(__name__)
 
-# 禁用系统代理，避免错误的代理配置导致连接失败
-for _proxy_key in (
-    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
-):
-    os.environ.pop(_proxy_key, None)
+class SpeedTestState(Enum):
+    """测速界面状态"""
+
+    IDLE = "idle"
+    TESTING = "testing"
+    DONE = "done"
+    ERROR = "error"
 
 
 def _build_opener():
@@ -75,10 +88,14 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 class _Signaler(QObject):
     """跨线程信号"""
+
     log = pyqtSignal(str)
     status = pyqtSignal(str)
     progress = pyqtSignal(int)
-    speed_update = pyqtSignal(float)  # 实时下载速度 Mbps
+    phase = pyqtSignal(str)       # 当前测速阶段
+    latency = pyqtSignal(float)   # 最佳节点延迟
+    speed_update = pyqtSignal(float)
+    curve_update = pyqtSignal(float, float)  # download, upload
     label_text = pyqtSignal(object, str)
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
@@ -94,6 +111,10 @@ class SpeedtestTab(QWidget):
         super().__init__()
         self._is_testing = False
         self._stop_event = threading.Event()
+        self._history_counter = 0
+        self._state = SpeedTestState.IDLE
+        self._current_phase = SpeedPhase.IDLE
+        self._last_result = None
         self._init_ui()
         self._init_signaler()
 
@@ -102,111 +123,231 @@ class SpeedtestTab(QWidget):
         self._signaler.log.connect(self._on_log)
         self._signaler.status.connect(self._on_status)
         self._signaler.progress.connect(self._on_progress)
+        self._signaler.phase.connect(self._on_phase)
+        self._signaler.latency.connect(self._on_latency)
         self._signaler.speed_update.connect(self._on_speed_update)
+        self._signaler.curve_update.connect(self._on_curve_update)
         self._signaler.label_text.connect(self._on_label_text)
         self._signaler.finished.connect(self._on_test_finished)
         self._signaler.failed.connect(self._on_test_failed)
         self._signaler.add_history.connect(self._add_history)
 
+    # ---- UI 构建 ----
+
     def _init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
 
-        # 按钮行
-        top = QHBoxLayout()
-        self.test_btn = QPushButton("🚀 开始测速")
-        self.test_btn.setMinimumHeight(40)
-        self.test_btn.setMinimumWidth(140)
-        self.test_btn.clicked.connect(self._on_start_test)
-        top.addWidget(self.test_btn)
+        layout.addLayout(self._build_header())
+        layout.addWidget(self._build_progress_bar())
+        layout.addLayout(self._build_stage(), 4)
+        layout.addLayout(self._build_metrics(), 1)
+        layout.addLayout(self._build_history_and_log(), 2)
+
+    def _build_header(self):
+        layout = QHBoxLayout()
+        layout.setSpacing(12)
+
+        left = QVBoxLayout()
+        left.setSpacing(4)
+        title = QLabel("网络测速")
+        title.setObjectName("speedPageTitle")
+        left.addWidget(title)
+
+        self.status_label = QLabel("点击「开始测速」测试当前网络带宽")
+        self.status_label.setObjectName("speedStatusLabel")
+        self.status_label.setWordWrap(True)
+        left.addWidget(self.status_label)
+
+        layout.addLayout(left, 1)
+
+        self.start_btn = QPushButton("开始测速")
+        self.start_btn.setObjectName("speedStartBtn")
+        self.start_btn.setMinimumHeight(44)
+        self.start_btn.setMinimumWidth(140)
+        set_button_icon(self.start_btn, Icon.SPEED, size=18, color=QColor("white"))
+        self.start_btn.clicked.connect(self._on_start_test)
+        layout.addWidget(self.start_btn)
 
         self.stop_btn = QPushButton("停止")
-        self.stop_btn.setMinimumHeight(40)
+        self.stop_btn.setObjectName("speedStopBtn")
+        self.stop_btn.setMinimumHeight(44)
+        self.stop_btn.setMinimumWidth(100)
         self.stop_btn.setEnabled(False)
+        set_button_icon(self.stop_btn, Icon.CANCEL, size=16, color=QColor("white"))
         self.stop_btn.clicked.connect(self._on_stop_test)
-        top.addWidget(self.stop_btn)
-        top.addStretch()
+        layout.addWidget(self.stop_btn)
 
-        self.status_label = QLabel("点击「开始测速」测试您的网络带宽")
-        self.status_label.setStyleSheet("font-size: 12px; color: #666;")
-        top.addWidget(self.status_label)
-        layout.addLayout(top)
+        return layout
 
-        # 进度条
+    def _build_progress_bar(self):
         self.progress_bar = QProgressBar()
+        self.progress_bar.setObjectName("speedProgressBar")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setMaximumHeight(6)
+        return self.progress_bar
 
-        # 结果区域
-        result_group = QGroupBox("测速结果")
-        result_layout = QHBoxLayout(result_group)
+    def _build_stage(self):
+        layout = QGridLayout()
+        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        def _make_result_box(title, label_name, color):
-            box = QVBoxLayout()
-            box.addWidget(QLabel(title), alignment=Qt.AlignmentFlag.AlignCenter)
-            lbl = QLabel("--")
-            lbl.setStyleSheet(f"font-size: 32px; font-weight: bold; color: {color};")
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            box.addWidget(lbl)
-            box.addWidget(QLabel("Mbps" if "速度" in title else "ms" if "延迟" in title else ""),
-                          alignment=Qt.AlignmentFlag.AlignCenter)
-            setattr(self, label_name, lbl)
-            result_layout.addLayout(box)
+        self.gauge = SpeedGauge()
+        self.gauge.setMinimumSize(300, 300)
+        layout.addWidget(self.gauge, 0, 0)
 
-        _make_result_box("下载速度", "download_label", "#2196F3")
-        _make_result_box("上传速度", "upload_label", "#4CAF50")
-        _make_result_box("网络延迟", "ping_label", "#FF9800")
+        self.chart = SpeedChartWidget(max_points=80)
+        self.chart.setMinimumSize(360, 280)
+        layout.addWidget(self.chart, 0, 1)
 
-        isp_layout = QVBoxLayout()
-        isp_layout.addWidget(QLabel("运营商/节点"), alignment=Qt.AlignmentFlag.AlignCenter)
-        self.isp_label = QLabel("--")
-        self.isp_label.setStyleSheet("font-size: 14px; color: #666;")
-        self.isp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        isp_layout.addWidget(self.isp_label)
-        isp_layout.addWidget(QLabel(""), alignment=Qt.AlignmentFlag.AlignCenter)
-        result_layout.addLayout(isp_layout)
+        layout.setColumnStretch(0, 4)
+        layout.setColumnStretch(1, 6)
+        return layout
 
-        layout.addWidget(result_group)
+    def _build_metrics(self):
+        layout = QHBoxLayout()
+        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        # 历史记录
-        history_group = QGroupBox("测速历史")
-        history_layout = QVBoxLayout(history_group)
-        self.history_table = QTableWidget()
-        self.history_table.setColumnCount(5)
-        self.history_table.setHorizontalHeaderLabels(
-            ["时间", "下载(Mbps)", "上传(Mbps)", "延迟(ms)", "运营商/节点"]
+        self.download_card = self._make_metric_card(
+            "▼ 下载速度", "download", "speedCardValueDownload"
         )
-        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.upload_card = self._make_metric_card(
+            "▲ 上传速度", "upload", "speedCardValueUpload"
+        )
+        self.ping_card = self._make_metric_card(
+            "◉ 网络延迟", "ping", "speedCardValuePing"
+        )
+
+        layout.addWidget(self.download_card)
+        layout.addWidget(self.upload_card)
+        layout.addWidget(self.ping_card)
+        return layout
+
+    def _make_metric_card(self, title: str, name: str, value_object_name: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("speedCard")
+        card.setMinimumHeight(110)
+        card.setFrameShape(QFrame.Shape.StyledPanel)
+        card.setFrameShadow(QFrame.Shadow.Plain)
+
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(16, 12, 16, 12)
+        vbox.setSpacing(6)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("speedCardTitle")
+        vbox.addWidget(title_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        value_label = QLabel("--")
+        value_label.setObjectName(value_object_name)
+        value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vbox.addWidget(value_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        unit = "Mbps" if name in ("download", "upload") else "ms"
+        unit_label = QLabel(unit)
+        unit_label.setObjectName("speedCardUnit")
+        unit_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vbox.addWidget(unit_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        vbox.addStretch()
+        setattr(self, f"{name}_label", value_label)
+        return card
+
+    def _build_history_and_log(self):
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        # 历史表格
+        self.history_table = QTableWidget()
+        self.history_table.setObjectName("speedHistoryTable")
+        self.history_table.setColumnCount(6)
+        self.history_table.setHorizontalHeaderLabels(
+            ["次数", "时间", "下载(Mbps)", "上传(Mbps)", "延迟(ms)", "运营商/节点"]
+        )
+        header = self.history_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        history_layout.addWidget(self.history_table)
-        clear_btn = QPushButton("清空历史")
-        clear_btn.clicked.connect(self._on_clear_history)
-        history_layout.addWidget(clear_btn)
-        layout.addWidget(history_group)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setMaximumHeight(160)
+        main_layout.addWidget(self.history_table)
 
-        # 日志
+        # 日志展开/收起
+        toolbar = QHBoxLayout()
+        toolbar.addStretch()
+
+        self.clear_history_btn = QPushButton("清空历史")
+        self.clear_history_btn.setObjectName("smallBtn")
+        self.clear_history_btn.setFixedHeight(30)
+        self.clear_history_btn.clicked.connect(self._on_clear_history)
+        toolbar.addWidget(self.clear_history_btn)
+
+        self.log_toggle_btn = QPushButton("展开日志")
+        self.log_toggle_btn.setObjectName("smallBtn")
+        self.log_toggle_btn.setFixedHeight(30)
+        self.log_toggle_btn.setCheckable(True)
+        self.log_toggle_btn.toggled.connect(self._on_toggle_log)
+        toolbar.addWidget(self.log_toggle_btn)
+
+        main_layout.addLayout(toolbar)
+
         self.detail_text = QTextEdit()
+        self.detail_text.setObjectName("speedLogPanel")
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMaximumHeight(180)
         self.detail_text.setPlaceholderText("测速详细日志...")
-        layout.addWidget(self.detail_text)
+        self.detail_text.setMinimumHeight(160)
+        self.detail_text.setVisible(False)
+        main_layout.addWidget(self.detail_text)
 
-        layout.setStretch(0, 0)
-        layout.setStretch(1, 0)
-        layout.setStretch(2, 0)
-        layout.setStretch(3, 1)
-        layout.setStretch(4, 1)
+        return main_layout
+
+    # ---- 状态机 ----
+
+    def _set_state(self, state: SpeedTestState, message: str = ""):
+        self._state = state
+        if state == SpeedTestState.IDLE:
+            self.start_btn.setText("开始测速")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.gauge.set_phase(SpeedPhase.IDLE)
+            set_status_style(self.status_label, "info")
+        elif state == SpeedTestState.TESTING:
+            self.start_btn.setText("停止测速")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(True)
+            set_status_style(self.status_label, "loading")
+        elif state == SpeedTestState.DONE:
+            self.start_btn.setText("重新测速")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.gauge.set_phase(SpeedPhase.DONE)
+            set_status_style(self.status_label, "success")
+        elif state == SpeedTestState.ERROR:
+            self.start_btn.setText("重新测速")
+            self.start_btn.setEnabled(True)
+            self.stop_btn.setEnabled(False)
+            self.gauge.set_phase(SpeedPhase.ERROR)
+            set_status_style(self.status_label, "error")
+
+        if message:
+            self.status_label.setText(message)
+
+        # 刷新按钮样式使 QSS ID 变化生效
+        self.start_btn.style().unpolish(self.start_btn)
+        self.start_btn.style().polish(self.start_btn)
 
     # ---- 信号槽 ----
 
     def _on_log(self, text: str):
         self.detail_text.append(text)
-        self.detail_text.verticalScrollBar().setValue(
-            self.detail_text.verticalScrollBar().maximum()
-        )
+        scrollbar = self.detail_text.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
 
     def _on_status(self, text: str):
         self.status_label.setText(text)
@@ -214,9 +355,38 @@ class SpeedtestTab(QWidget):
     def _on_progress(self, value: int):
         self.progress_bar.setValue(value)
 
+    def _on_phase(self, phase_name: str):
+        try:
+            phase = SpeedPhase(phase_name)
+        except ValueError:
+            return
+        self._current_phase = phase
+        self.gauge.set_phase(phase)
+        if phase in (SpeedPhase.DOWNLOAD, SpeedPhase.UPLOAD):
+            self.gauge.set_value(0.0, animate=False)
+            self.gauge.set_progress(0.0, animate=False)
+
+    def _on_latency(self, latency: float):
+        self.gauge.set_value(latency)
+        self.gauge.set_progress(min(1.0, latency / 100.0))
+        self.ping_label.setText(f"{latency:.1f}")
+
     def _on_speed_update(self, speed: float):
-        """实时速度更新"""
-        self.download_label.setText(f"{speed:.1f}")
+        if self._current_phase == SpeedPhase.DOWNLOAD:
+            self.gauge.set_value(speed)
+            self.gauge.set_progress(speed / max(1.0, self.gauge._max_value))
+
+    def _on_curve_update(self, download: float, upload: float):
+        try:
+            if download > 0:
+                self.chart.add_download_point(download)
+            if upload > 0:
+                self.chart.add_upload_point(upload)
+                if self._current_phase == SpeedPhase.UPLOAD:
+                    self.gauge.set_value(upload)
+                    self.gauge.set_progress(upload / max(1.0, self.gauge._max_value))
+        except Exception:
+            pass
 
     def _on_label_text(self, label, text: str):
         label.setText(text)
@@ -224,21 +394,15 @@ class SpeedtestTab(QWidget):
     # ---- 测速控制 ----
 
     def _on_start_test(self):
+        if self._state == SpeedTestState.TESTING:
+            self._on_stop_test()
+            return
         if self._is_testing:
             return
         self._is_testing = True
         self._stop_event.clear()
-        self.test_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("准备测速...")
-        self.status_label.setStyleSheet("color: #2196F3;")
-
-        self.download_label.setText("--")
-        self.upload_label.setText("--")
-        self.ping_label.setText("--")
-        self.isp_label.setText("--")
-        self.detail_text.clear()
+        self._reset_ui()
+        self._set_state(SpeedTestState.TESTING, "准备测速...")
 
         thread = threading.Thread(target=self._test_worker, daemon=True)
         thread.start()
@@ -246,8 +410,16 @@ class SpeedtestTab(QWidget):
     def _on_stop_test(self):
         self._stop_event.set()
         self._is_testing = False
-        self.status_label.setText("已停止")
-        self.status_label.setStyleSheet("color: #999;")
+        self._set_state(SpeedTestState.IDLE, "已停止")
+
+    def _reset_ui(self):
+        self.progress_bar.setValue(0)
+        self.download_label.setText("--")
+        self.upload_label.setText("--")
+        self.ping_label.setText("--")
+        self.detail_text.clear()
+        self.gauge.reset()
+        self.chart.reset()
 
     def _test_worker(self):
         try:
@@ -326,6 +498,7 @@ class SpeedtestTab(QWidget):
 
         # 3. 测延迟
         self._signaler.status.emit("正在探测最佳节点...")
+        self._signaler.phase.emit(SpeedPhase.LATENCY.value)
         self._signaler.progress.emit(15)
         best_server = None
         best_latency = float("inf")
@@ -348,10 +521,12 @@ class SpeedtestTab(QWidget):
             f"最佳节点: {best_server['sponsor']} - {best_server['name']} "
             f"(延迟: {best_latency:.1f}ms, 距离: {best_server['dist']:.0f}km)"
         )
+        self._signaler.latency.emit(best_latency)
         self._signaler.progress.emit(20)
 
         # 4. 下载测速（多线程）
         self._signaler.status.emit("正在测试下载速度...")
+        self._signaler.phase.emit(SpeedPhase.DOWNLOAD.value)
         dl_url = best_server["url"].replace("upload.php", "download")
         dl_speed = self._test_download(dl_url)
         if self._stop_event.is_set():
@@ -362,6 +537,7 @@ class SpeedtestTab(QWidget):
 
         # 5. 上传测速（多线程）
         self._signaler.status.emit("正在测试上传速度...")
+        self._signaler.phase.emit(SpeedPhase.UPLOAD.value)
         ul_speed = self._test_upload(best_server["url"])
         if self._stop_event.is_set():
             return None
@@ -381,7 +557,6 @@ class SpeedtestTab(QWidget):
         self._signaler.label_text.emit(self.download_label, str(result["download"]))
         self._signaler.label_text.emit(self.upload_label, str(result["upload"]))
         self._signaler.label_text.emit(self.ping_label, str(result["ping"]))
-        self._signaler.label_text.emit(self.isp_label, result["isp"])
 
         self._signaler.add_history.emit(
             result["download"], result["upload"], result["ping"], result["isp"]
@@ -434,6 +609,7 @@ class SpeedtestTab(QWidget):
                 with lock:
                     current_speed = (total_bytes * 8) / elapsed / 1_000_000
                 self._signaler.speed_update.emit(current_speed)
+                self._signaler.curve_update.emit(current_speed, 0.0)
                 self._signaler.progress.emit(20 + int(min(elapsed / 8, 1) * 35))
             time.sleep(0.3)
 
@@ -490,6 +666,7 @@ class SpeedtestTab(QWidget):
             if elapsed > 0:
                 with lock:
                     current_speed = (total_bytes * 8) / elapsed / 1_000_000
+                self._signaler.curve_update.emit(0.0, current_speed)
                 self._signaler.progress.emit(55 + int(min(elapsed / 6, 1) * 30))
             time.sleep(0.3)
 
@@ -504,34 +681,40 @@ class SpeedtestTab(QWidget):
     # ---- 历史记录 ----
 
     def _add_history(self, download: float, upload: float, ping: float, isp: str):
-        row = self.history_table.rowCount()
+        # 序号自增
+        self._history_counter += 1
         self.history_table.insertRow(0)
-        self.history_table.setItem(0, 0, QTableWidgetItem(datetime.now().strftime("%m-%d %H:%M")))
-        self.history_table.setItem(0, 1, QTableWidgetItem(str(download)))
-        self.history_table.setItem(0, 2, QTableWidgetItem(str(upload)))
-        self.history_table.setItem(0, 3, QTableWidgetItem(str(ping)))
-        self.history_table.setItem(0, 4, QTableWidgetItem(str(isp)))
-        if self.history_table.rowCount() > 50:
+        self.history_table.setItem(0, 0, QTableWidgetItem(str(self._history_counter)))
+        self.history_table.setItem(0, 1, QTableWidgetItem(datetime.now().strftime("%m-%d %H:%M")))
+        self.history_table.setItem(0, 2, QTableWidgetItem(str(download)))
+        self.history_table.setItem(0, 3, QTableWidgetItem(str(upload)))
+        self.history_table.setItem(0, 4, QTableWidgetItem(str(ping)))
+        self.history_table.setItem(0, 5, QTableWidgetItem(str(isp)))
+        if self.history_table.rowCount() > 200:
             self.history_table.removeRow(self.history_table.rowCount() - 1)
 
     def _on_test_finished(self, result: dict):
         self._is_testing = False
-        self.test_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress_bar.setValue(100)
-        self.status_label.setText("测速完成")
-        self.status_label.setStyleSheet("color: #4CAF50;")
+        self._last_result = result
+        self._set_state(
+            SpeedTestState.DONE,
+            f"测速完成 · 下载 {result.get('download', '--')} Mbps / 上传 {result.get('upload', '--')} Mbps",
+        )
+        self.gauge.set_value(result.get("download", 0.0))
+        self.gauge.set_progress(1.0)
         self.download_label.setText(str(result.get("download", "--")))
         self.upload_label.setText(str(result.get("upload", "--")))
         self.ping_label.setText(str(result.get("ping", "--")))
+        self.progress_bar.setValue(100)
 
     def _on_test_failed(self, error_msg: str):
         self._is_testing = False
-        self.test_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._set_state(SpeedTestState.ERROR, f"测速失败: {error_msg}")
         self.progress_bar.setValue(0)
-        self.status_label.setText(f"测速失败: {error_msg}")
-        self.status_label.setStyleSheet("color: #f44336;")
 
     def _on_clear_history(self):
         self.history_table.setRowCount(0)
+
+    def _on_toggle_log(self, checked: bool):
+        self.detail_text.setVisible(checked)
+        self.log_toggle_btn.setText("收起日志" if checked else "展开日志")

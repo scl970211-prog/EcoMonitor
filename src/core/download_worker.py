@@ -665,30 +665,30 @@ class DownloadWorker(QRunnable):
     - 优雅暂停/恢复
     """
     
-    def __init__(self, device: Device, task: DownloadTask):
+    def __init__(self, task: DownloadTask):
         super().__init__()
-        self.device = device
         self.task = task
-        
+        self.device: Optional[Device] = None
+
         # 核心组件
         self._state_manager = TaskStateManager(task)
         self._temp_manager: Optional[TempFileManager] = None
         self._pause_controller = PauseController()
         self._executor: Optional[CooperativeExecutor] = None
-        
+
         # 队列（下载→转换）
         self._convert_queue = queue.Queue(maxsize=2)
-        
+
         # 信号
         self.signals = WorkerSignals()
-        
+
         # 取消标志
         self._cancelled = threading.Event()
-        
+
         # 统计
         self._download_count = 0
         self._convert_count = 0
-        
+
         # 连接状态管理器信号
         self._state_manager.segment_changed.connect(
             lambda tid, idx, st: self.signals.segment_status_changed.emit(tid, idx, st)
@@ -721,7 +721,20 @@ class DownloadWorker(QRunnable):
             self.task.status = DownloadTask.STATUS_DOWNLOADING
             self.task.phase = "download"
             self.signals.phase_changed.emit(self.task.task_id, "download")
-            
+
+            # 在工作线程中创建设备并登录，避免阻塞 UI 主线程
+            self.device = Device(
+                ip=self.task.device_ip,
+                port=self.task.device_port,
+                http_port=80,
+                username=self.task.device_username,
+                password=self.task.device_password,
+            )
+            # 下载任务不需要自动重连/心跳，关闭以避免依赖工作线程事件循环
+            self.device.enable_auto_reconnect(False)
+            if not self.device.login():
+                raise TaskError("设备登录失败", ErrorSeverity.FATAL)
+
             # 使用上下文管理器确保资源清理
             with TempFileManager(self.task.task_id) as temp_mgr:
                 self._temp_manager = temp_mgr
@@ -761,6 +774,11 @@ class DownloadWorker(QRunnable):
             self._finalize_failure(str(e))
         finally:
             logger.info(f"[DownloadWorker] 任务结束，清理资源: {self.task.task_id}")
+            if self.device is not None:
+                try:
+                    self.device.logout()
+                except Exception:
+                    pass
             self._state_manager.stop()
     
     def _monitor_tasks(self, download_future, convert_future):

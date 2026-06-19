@@ -22,6 +22,7 @@ def test_core_imports():
     from src.core.database import Database
     from src.core.download_task import DownloadTask
     from src.core.event_bus import EventBus
+    from src.core.constants import DEFAULT_SDK_PORT, DEVICE_TYPE_MAP
 
 
 def test_utils_imports():
@@ -36,3 +37,12 @@ def test_gui_imports():
     # 仅导入不依赖 Qt 运行时实例的模块
     from src.gui.main_window import MainWindow
     from src.gui.tabs.connection_tab import ConnectionTab
+    from src.gui.constants import Color, TabLabel
+
+
+def test_constants_imports():
+    """测试常量模块导入"""
+    from src.core.constants import DEFAULT_SDK_PORT
+    from src.gui.constants import Color, TabLabel
+    assert Color.PRIMARY == "#2196F3"
+    assert TabLabel.DEVICE_SCAN == "设备搜索"

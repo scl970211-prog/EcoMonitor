@@ -3,6 +3,10 @@
 扩充OUI数据库脚本
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # 额外的OUI条目（会被添加到现有数据库中）
 EXTRA_OUI_ENTRIES = {
     # 更多TP-Link
@@ -892,7 +896,9 @@ EXTRA_OUI_ENTRIES = {
 def main():
     import sys
     import os
-    
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     # 读取原始文件
     with open('src/core/scanner/device_info.py', 'r', encoding='utf-8') as f:
         content = f.read()
@@ -903,7 +909,7 @@ def main():
     
     start_idx = content.find(start_marker)
     if start_idx == -1:
-        print("无法找到DEFAULT_OUI_DB")
+        logger.error("无法找到 DEFAULT_OUI_DB")
         return
     
     # 找到匹配的结束括号
@@ -934,7 +940,7 @@ def main():
     with open('src/core/scanner/device_info.py', 'w', encoding='utf-8') as f:
         f.write(new_content)
     
-    print(f"OUI数据库已更新，包含 {len(EXTRA_OUI_ENTRIES)} 个条目")
+    logger.info("OUI数据库已更新，包含 %d 个条目", len(EXTRA_OUI_ENTRIES))
 
 if __name__ == "__main__":
     main()

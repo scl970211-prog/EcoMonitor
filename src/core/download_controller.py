@@ -126,32 +126,12 @@ class DownloadManager(QObject):
             self._start_task(task)
 
     def _start_task(self, task: DownloadTask):
-        device = None
         try:
-            device = Device(
-                ip=task.device_ip,
-                port=task.device_port,
-                http_port=80,
-                username=task.device_username,
-                password=task.device_password,
-            )
-
-            if not device.login():
-                raise RuntimeError("设备登录失败")
-
-            worker = DownloadWorker(device, task)
+            worker = DownloadWorker(task)
             worker.signals.progress.connect(self._on_progress)
             worker.signals.phase_changed.connect(self._on_phase_changed)
             worker.signals.log.connect(self._log)
-
-            def on_finished_wrapper(task_id, success, message):
-                try:
-                    device.logout()
-                except Exception as exc:
-                    self._log(f"[警告] 设备登出失败: {task.device_ip} {exc}")
-                self._on_finished(task_id, success, message)
-
-            worker.signals.finished.connect(on_finished_wrapper)
+            worker.signals.finished.connect(self._on_finished)
 
             with QMutexLocker(self._lock):
                 self._active_workers[task.task_id] = worker
@@ -163,12 +143,6 @@ class DownloadManager(QObject):
                 f"开始执行任务: CH{task.channel:02d}，已选择 {task.matched_file_count or '?'} 个录像"
             )
         except Exception as exc:
-            # 确保设备连接被关闭
-            if device:
-                try:
-                    device.logout()
-                except Exception:
-                    pass
             task.status = DownloadTask.STATUS_FAILED
             task.error_msg = str(exc)
             task.last_error_stage = "connect"

@@ -4,15 +4,19 @@
 
 清理项（安全）：
 1. Qt 翻译文件：仅保留中文(zh_CN, zh_TW)和英文(en)
-2. opengl32sw.dll：纯2D GUI无需Software OpenGL回退
-3. Qt6Pdf.dll：程序无PDF显示功能
-4. 多余图片格式插件：仅保留 ico/jpeg/png/svg
-5. Qt帮助翻译文件
-6. ffprobe.exe：_get_video_duration 已支持 ffmpeg 回退
+2. Qt6Pdf.dll：程序无PDF显示功能
+3. 多余图片格式插件：仅保留 ico/jpeg/png/svg
+4. Qt帮助翻译文件
+5. ffprobe.exe：_get_video_duration 已支持 ffmpeg 回退
+
+注意：保留 opengl32sw.dll，以兼容无 GPU/OpenGL 的环境。
 """
 
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def cleanup(dist_dir: Path) -> dict:
@@ -21,7 +25,7 @@ def cleanup(dist_dir: Path) -> dict:
 
     internal = dist_dir / "_internal"
     if not internal.exists():
-        print(f"[ERROR] 未找到 _internal 目录: {internal}")
+        logger.error("未找到 _internal 目录: %s", internal)
         return {"saved_mb": 0, "removed": []}
 
     # 1. Qt 翻译文件 - 只保留中文和英文
@@ -34,14 +38,7 @@ def cleanup(dist_dir: Path) -> dict:
                 removed_files.append(str(f.relative_to(dist_dir)))
                 f.unlink()
 
-    # 2. 删除 opengl32sw.dll
-    opengl = internal / "PyQt6" / "Qt6" / "bin" / "opengl32sw.dll"
-    if opengl.exists():
-        saved += opengl.stat().st_size
-        removed_files.append(str(opengl.relative_to(dist_dir)))
-        opengl.unlink()
-
-    # 3. 删除 Qt6Pdf.dll
+    # 2. 删除 Qt6Pdf.dll
     pdf_dll = internal / "PyQt6" / "Qt6" / "bin" / "Qt6Pdf.dll"
     if pdf_dll.exists():
         saved += pdf_dll.stat().st_size
@@ -81,19 +78,20 @@ def cleanup(dist_dir: Path) -> dict:
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     if len(sys.argv) > 1:
         dist_dir = Path(sys.argv[1])
     else:
         # 默认路径：从 build 目录向上找到 dist
         dist_dir = Path(__file__).parent.parent / "dist" / "EcoMonitor"
 
-    print(f"[清理] 目标目录: {dist_dir}")
+    logger.info("[清理] 目标目录: %s", dist_dir)
     result = cleanup(dist_dir)
-    print(f"[清理] 删除文件数: {len(result['removed'])}")
-    print(f"[清理] 节省空间: {result['saved_mb']:.1f} MB")
+    logger.info("[清理] 删除文件数: %d", len(result['removed']))
+    logger.info("[清理] 节省空间: %.1f MB", result['saved_mb'])
     if result['removed']:
-        print("[清理] 删除的文件:")
+        logger.info("[清理] 删除的文件:")
         for f in result['removed'][:10]:
-            print(f"  - {f}")
+            logger.info("  - %s", f)
         if len(result['removed']) > 10:
-            print(f"  ... 等共 {len(result['removed'])} 个文件")
+            logger.info("  ... 等共 %d 个文件", len(result['removed']))

@@ -54,10 +54,15 @@ DEFAULT_CONFIG = {
         "delete_after_convert": False
     },
     "ui": {
+        "theme": "light",
         "window_width": 1400,
         "window_height": 900,
         "log_level": "INFO",
-        "main_splitter_state": ""
+        "main_splitter_state": "",
+        # 启动行为：设备连接时自动创建并初始化预览/下载标签（默认关闭）
+        "auto_init_tabs_on_connect": False,
+        "auto_init_tabs_on_connect_delay": 2,
+        "auto_init_tabs_on_connect_max_concurrent": 1
     }
 }
 
@@ -240,3 +245,4 @@ class Config:
 def get_config() -> Config:
     """获取配置实例"""
     return Config()
+

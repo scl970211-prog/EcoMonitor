@@ -117,4 +117,4 @@ def show_warning_dialog(title: str, message: str):
             ctypes.windll.user32.MessageBoxW(0, message, title, 0x30)
         except Exception:
             pass
-    print(f"\n[警告] {title}: {message}", file=sys.stderr)
+    logger.error("[警告] %s: %s", title, message)

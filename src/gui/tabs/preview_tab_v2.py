@@ -8,86 +8,19 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QListWidget, QListWidgetItem, QLabel, QPushButton,
+    QListWidgetItem, QLabel, QPushButton,
     QComboBox, QGroupBox, QSplitter, QMessageBox, QLineEdit,
-    QMenu, QInputDialog, QApplication
+    QMenu, QInputDialog
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QTimer
-from PyQt6.QtGui import QDrag
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from typing import Optional, Dict, List
 
 from ...core import Device, DeviceStatus, ChannelStatus
 from ..widgets.video_grid_v2 import VideoGridV2 as VideoGrid
+from ..widgets.draggable_channel_list import DraggableChannelList
 from ...utils.config import get_config
 from ...utils.logger import get_logger
-
-
-class DraggableChannelList(QListWidget):
-    """
-    支持拖拽的通道列表
-    可以将通道拖拽到视频窗口
-    """
-    
-    # 自定义信号：通道被拖拽
-    channel_dragged = pyqtSignal(int, str)  # channel_id, channel_name
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setDragEnabled(True)  # 启用拖拽
-        self.setAcceptDrops(False)  # 不接收放置
-        self.setDragDropMode(QListWidget.DragDropMode.DragOnly)
-        self._drag_start_pos = None
-        
-        # 设置选择模式
-        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        
-        # 启用双击编辑（禁用，仅用于触发双击事件）
-        self.setEditTriggers(QListWidget.EditTrigger.NoEditTriggers)
-    
-    def mousePressEvent(self, event):
-        """鼠标按下事件"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos = event.pos()
-        super().mousePressEvent(event)
-    
-    def mouseMoveEvent(self, event):
-        """鼠标移动事件 - 启动拖拽"""
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-        
-        if self._drag_start_pos is None:
-            return
-        
-        # 计算移动距离，防止误触
-        distance = (event.pos() - self._drag_start_pos).manhattanLength()
-        if distance < QApplication.startDragDistance():
-            return
-        
-        # 获取当前选中的项
-        current_item = self.currentItem()
-        if not current_item:
-            return
-        
-        # 获取通道信息
-        channel_id = current_item.data(Qt.ItemDataRole.UserRole)
-        channel_name = current_item.data(Qt.ItemDataRole.UserRole + 1)
-        
-        if channel_id is None:
-            return
-        
-        # 创建拖拽对象
-        drag = QDrag(self)
-        mime_data = QMimeData()
-        
-        # 设置自定义数据
-        mime_data.setText(f"{channel_id}:{channel_name}")
-        drag.setMimeData(mime_data)
-        
-        # 发射信号
-        self.channel_dragged.emit(channel_id, channel_name or str(channel_id))
-        
-        # 执行拖拽
-        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction)
+from ..theme import set_text_style
 
 
 class PreviewTabV2(QWidget):
@@ -150,11 +83,11 @@ class PreviewTabV2(QWidget):
         device_layout = QVBoxLayout(device_group)
         
         self.device_status_label = QLabel("状态: 未连接")
-        self.device_status_label.setStyleSheet("color: #666;")
+        set_text_style(self.device_status_label, "secondary")
         device_layout.addWidget(self.device_status_label)
-        
+
         self.device_info_label = QLabel("IP: --")
-        self.device_info_label.setStyleSheet("color: #666; font-size: 11px;")
+        set_text_style(self.device_info_label, "secondary", size="11px")
         device_layout.addWidget(self.device_info_label)
         
         left_layout.addWidget(device_group)
@@ -204,7 +137,7 @@ class PreviewTabV2(QWidget):
         
         # 通道数量标签
         self.channel_count_label = QLabel("通道: 0")
-        self.channel_count_label.setStyleSheet("color: #666; font-size: 11px;")
+        set_text_style(self.channel_count_label, "secondary", size="11px")
         channel_layout.addWidget(self.channel_count_label)
         
         left_layout.addWidget(channel_group)
@@ -262,7 +195,7 @@ class PreviewTabV2(QWidget):
         
         # 状态栏
         self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        set_text_style(self.status_label, "secondary", size="11px")
         right_layout.addWidget(self.status_label)
         
         # 添加到分割器
@@ -331,7 +264,7 @@ class PreviewTabV2(QWidget):
         else:
             # 清除设备状态显示
             self.device_status_label.setText("状态: 未连接")
-            self.device_status_label.setStyleSheet("color: #666;")
+            set_text_style(self.device_status_label, "secondary")
             self.device_info_label.setText("IP: --")
             
             # 禁用控件
@@ -362,6 +295,35 @@ class PreviewTabV2(QWidget):
             self.device_info_label.setText(f"IP: {ip}")
         else:
             self.device_info_label.setText("IP: --")
+
+    def light_init(self, device: Optional[Device], device_info: Dict):
+        """轻量初始化：仅更新显示信息，不建立流或检索通道（非阻塞）"""
+        try:
+            # 保存引用，但不连接设备信号或加载通道
+            self._device = device
+            self._device_info = device_info or {}
+            if self._device_info:
+                ip = self._device_info.get('ip', '--')
+                self.device_info_label.setText(f"IP: {ip}")
+            else:
+                self.device_info_label.setText("IP: --")
+            # 仅启用刷新按钮，让用户可以主动触发加载
+            try:
+                self.refresh_btn.setEnabled(bool(device))
+            except Exception:
+                pass
+        except Exception:
+            self._logger.exception('light_init 失败')
+
+    def full_init(self, device: Optional[Device], device_info: Dict):
+        """完整初始化：执行原来的 set_device 逻辑（建立信号/加载通道等）"""
+        try:
+            # 当 full_init 被调用时，执行现有的 set_device 行为
+            self.set_device(device)
+            # 也保证设备信息被设置
+            self.set_device_info(device_info or {})
+        except Exception:
+            self._logger.exception('full_init 失败')
     
     def _load_channels(self):
         """加载通道列表"""
@@ -931,22 +893,22 @@ class PreviewTabV2(QWidget):
     def _update_device_status_display(self, status: str, error_msg: str = ""):
         """更新设备状态显示"""
         status_text_map = {
-            DeviceStatus.OFFLINE: ("离线", "#999"),
-            DeviceStatus.CONNECTING: ("连接中...", "#ff9800"),
-            DeviceStatus.ONLINE: ("在线", "#4caf50"),
-            DeviceStatus.ERROR: ("错误", "#f44336"),
-            DeviceStatus.RECONNECTING: ("重连中...", "#ff9800"),
+            DeviceStatus.OFFLINE: ("离线", "offline"),
+            DeviceStatus.CONNECTING: ("连接中...", "warning"),
+            DeviceStatus.ONLINE: ("在线", "success"),
+            DeviceStatus.ERROR: ("错误", "error"),
+            DeviceStatus.RECONNECTING: ("重连中...", "warning"),
         }
-        
-        text, color = status_text_map.get(status, ("未知", "#666"))
-        
+
+        text, role = status_text_map.get(status, ("未知", "secondary"))
+
         if error_msg and status in (DeviceStatus.ERROR, DeviceStatus.OFFLINE):
             display_text = f"状态: {text} - {error_msg}"
         else:
             display_text = f"状态: {text}"
-        
+
         self.device_status_label.setText(display_text)
-        self.device_status_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        set_status_style(self.device_status_label, role, bold=True)
     
     def _on_channel_status_changed(self, channel_id: int, status: str):
         """通道状态变化"""

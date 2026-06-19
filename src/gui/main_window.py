@@ -19,12 +19,16 @@ import logging
 from datetime import datetime
 
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QStatusBar, QTextEdit, QLabel, QPushButton,
-    QDialog, QProgressBar, QComboBox, QLineEdit, QFrame, QSplitter
+    QDialog, QProgressBar, QComboBox, QLineEdit, QFrame, QSplitter,
+    QCheckBox, QMenu, QSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
+
+from . import icons
+from .theme import Theme, get_theme_manager, log_badge_colors, text_color
 
 from ..core import SDKLoader, Device, DownloadManager
 from ..core.app_state import get_app_state
@@ -40,8 +44,8 @@ from .tabs.network_quality_tab import NetworkQualityTab
 from .tabs.speedtest_tab import SpeedtestTab
 from .tabs.ip_conflict_tab import IPConflictTab
 from .tabs.traffic_analysis_tab import TrafficAnalysisTab
-from .tabs.packet_capture_tab import PacketCaptureTab
-from .styles import MAIN_WINDOW, LOG_TOOLBAR_BTN
+from .constants import TabLabel
+from .styles import get_global_stylesheet
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +54,7 @@ class MainWindow(QMainWindow):
     """EcoMonitor 生态监控平台主窗口"""
     
     WINDOW_TITLE = "EcoMonitor 生态监控平台"
-    FOOTER_TEXT = "软件开发：中国水利水电科学研究院（技术人员：孙成龙）"
+    FOOTER_TEXT = "软件开发：际和（北京）科技有限责任公司（技术人员：孙成龙）"
     
     # 信号
     log_message = pyqtSignal(str)
@@ -70,6 +74,10 @@ class MainWindow(QMainWindow):
         # 配置
         self._config = get_config()
         
+        # 主题管理器
+        self._theme_manager = get_theme_manager()
+        self._theme_manager.set_theme(self._config.get("ui.theme", Theme.LIGHT.value))
+        
         # 当前连接的设备
         self._current_device: Device = None
         self._device_info: dict = {}
@@ -81,6 +89,11 @@ class MainWindow(QMainWindow):
         # 自动登录相关
         self._auto_login_dialog = None
         self._auto_login_attempted = False
+        
+        # 自动初始化状态
+        self._auto_full_init_queue = []
+        self._auto_full_init_running = 0
+        self._auto_full_init_scheduled = False
         
         # 初始化组件
         self._init_ui()
@@ -131,13 +144,23 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("就绪")
         
         footer_label = QLabel(self.FOOTER_TEXT)
+        footer_label.setObjectName("footerLabel")
         footer_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        footer_label.setStyleSheet("color: #666666; font-size: 9pt;")
         self.status_bar.addPermanentWidget(footer_label)
         
-        # 应用样式
+        # 应用样式与主题
         self._apply_styles()
-    
+        self._theme_manager.apply_to_app(QApplication.instance())
+
+        # 菜单：设置 -> 启动行为
+        try:
+            menubar = self.menuBar()
+            settings_menu = menubar.addMenu("设置")
+            startup_action = QAction("启动行为...", self)
+            startup_action.triggered.connect(self._open_startup_settings)
+            settings_menu.addAction(startup_action)
+        except Exception:
+            logger.exception("创建菜单失败")
     def _restore_splitter_state(self):
         """从配置恢复分割器状态"""
         splitter_state = self._config.get("ui.main_splitter_state", None)
@@ -157,121 +180,384 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
     
+    def _create_tab_placeholder(self, label: str) -> QWidget:
+        """创建空占位标签页，减少启动时组件开销"""
+        placeholder = QWidget()
+        placeholder.setObjectName("tab_placeholder")
+        return placeholder
+    
+    def _register_lazy_tab(self, attr_name: str, factory, label: str, enabled: bool = True):
+        """注册延迟创建标签页"""
+        placeholder = self._create_tab_placeholder(label)
+        placeholder.setObjectName(f"placeholder_{attr_name}")
+        setattr(self, attr_name, None)
+        self._lazy_tab_factories[attr_name] = {
+            'factory': factory,
+            'label': label,
+            'enabled': enabled,
+            'placeholder': placeholder,
+        }
+        self._lazy_tab_order.append(attr_name)
+        index = self.tab_widget.addTab(placeholder, label)
+        self.tab_widget.setTabEnabled(index, enabled)
+        tab_icon = icons.create_tab_icon(label)
+        if tab_icon is not None:
+            self.tab_widget.setTabIcon(index, tab_icon)
+    
+    def _ensure_tab(self, attr_name: str):
+        """确保标签页已创建，如果是占位符则替换为真实页面"""
+        tab_info = self._lazy_tab_factories.get(attr_name)
+        if tab_info is None:
+            return
+        existing = getattr(self, attr_name, None)
+        if existing is not None:
+            return
+        index = self._get_lazy_tab_index(attr_name)
+        if index < 0:
+            return
+        widget = tab_info['factory']()
+        setattr(self, attr_name, widget)
+        if hasattr(widget, 'log_message'):
+            widget.log_message.connect(self.log)
+        self.tab_widget.removeTab(index)
+        self.tab_widget.insertTab(index, widget, tab_info['label'])
+        self.tab_widget.setTabEnabled(index, tab_info['enabled'])
+    
+    def _get_lazy_tab_index(self, attr_name: str) -> int:
+        """查找占位符标签页索引"""
+        tab_info = self._lazy_tab_factories.get(attr_name)
+        if tab_info is None:
+            return -1
+        placeholder = tab_info.get('placeholder')
+        if placeholder is None:
+            return -1
+        return self.tab_widget.indexOf(placeholder)
+
     def _add_tabs(self):
         """添加标签页"""
+        self._lazy_tab_factories = {}
+        self._lazy_tab_order = []
+
         # 1. 设备搜索
         self.scan_tab = DeviceScanTab()
         self.scan_tab.device_selected.connect(self._on_device_selected)
-        self.tab_widget.addTab(self.scan_tab, "🔍 设备搜索")
-        
+        idx = self.tab_widget.addTab(self.scan_tab, TabLabel.DEVICE_SCAN)
+        scan_icon = icons.create_tab_icon(TabLabel.DEVICE_SCAN)
+        if scan_icon is not None:
+            self.tab_widget.setTabIcon(idx, scan_icon)
+
         # 2. 设备连接
         self.connection_tab = ConnectionTab()
         self.connection_tab.connection_changed.connect(self._on_connection_changed)
         self.connection_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.connection_tab, "🔗 设备连接")
-        
+        idx = self.tab_widget.addTab(self.connection_tab, TabLabel.CONNECTION)
+        conn_icon = icons.create_tab_icon(TabLabel.CONNECTION)
+        if conn_icon is not None:
+            self.tab_widget.setTabIcon(idx, conn_icon)
+
         # 3. 视频预览 (V2)
-        self.preview_tab = PreviewTabV2()
-        self.preview_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.preview_tab, "📹 视频预览")
-        self.tab_widget.setTabEnabled(2, False)  # 初始禁用
-        
+        self._register_lazy_tab(
+            'preview_tab',
+            self._create_preview_tab,
+            TabLabel.PREVIEW,
+            enabled=False,
+        )
+
         # 4. 批量下载 (V2)
-        self.download_tab = DownloadTabV2(self._download_manager)
-        self.download_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.download_tab, "⬇️ 批量下载")
-        self.tab_widget.setTabEnabled(3, False)
-        
+        self._register_lazy_tab(
+            'download_tab',
+            self._create_download_tab,
+            TabLabel.DOWNLOAD,
+            enabled=False,
+        )
+
         # 5. 下载管理 (V2)
-        self.manager_tab = DownloadManagerTabV2(self._download_manager)
-        self.tab_widget.addTab(self.manager_tab, "📂 下载管理")
-        
+        self._register_lazy_tab(
+            'manager_tab',
+            self._create_manager_tab,
+            TabLabel.DOWNLOAD_MANAGER,
+        )
+
         # 6. 终端调试
-        self.terminal_tab = TerminalTab()
-        self.terminal_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.terminal_tab, "🔧 终端调试")
-        
+        self._register_lazy_tab(
+            'terminal_tab',
+            self._create_terminal_tab,
+            TabLabel.TERMINAL,
+        )
+
         # 7. 网络质量
-        self.network_quality_tab = NetworkQualityTab()
-        self.network_quality_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.network_quality_tab, "⚡ 网络质量")
-        
-        # 8. 宽带测速
-        self.speedtest_tab = SpeedtestTab()
-        self.speedtest_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.speedtest_tab, "🌐 宽带测速")
-        
+        self._register_lazy_tab(
+            'network_quality_tab',
+            self._create_network_quality_tab,
+            TabLabel.NETWORK_QUALITY,
+        )
+
+        # 8. 网络测速（原: 宽带测速）
+        self._register_lazy_tab(
+            'speedtest_tab',
+            self._create_speedtest_tab,
+            TabLabel.SPEEDTEST,
+        )
+
         # 9. IP冲突检测
-        self.ip_conflict_tab = IPConflictTab()
-        self.ip_conflict_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.ip_conflict_tab, "📡 IP冲突检测")
-        
+        self._register_lazy_tab(
+            'ip_conflict_tab',
+            self._create_ip_conflict_tab,
+            TabLabel.IP_CONFLICT,
+        )
+
         # 10. 流量分析
-        self.traffic_analysis_tab = TrafficAnalysisTab()
-        self.traffic_analysis_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.traffic_analysis_tab, "📊 流量分析")
-        
-        # 11. 抓包分析
-        self.packet_capture_tab = PacketCaptureTab()
-        self.packet_capture_tab.log_message.connect(self.log)
-        self.tab_widget.addTab(self.packet_capture_tab, "🦈 抓包分析")
+        self._register_lazy_tab(
+            'traffic_analysis_tab',
+            self._create_traffic_analysis_tab,
+            TabLabel.TRAFFIC_ANALYSIS,
+        )
+
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
     
+    def _on_tab_changed(self, index: int):
+        """处理标签页切换，必要时创建延迟标签页的真实页面"""
+        try:
+            # 尝试通过标签文本来解析对应的延迟 tab，避免索引漂移问题
+            if index < 0:
+                return
+            tab_text = self.tab_widget.tabText(index)
+            # 匹配已注册的延迟标签的 label 字段
+            attr_name = None
+            for name, info in self._lazy_tab_factories.items():
+                if info.get('label') == tab_text:
+                    attr_name = name
+                    break
+            if attr_name is None:
+                return
+            self._ensure_tab(attr_name)
+            # 如果标签支持 full_init，则在短延时后执行完整初始化（非阻塞）
+            try:
+                widget = getattr(self, attr_name, None)
+                if widget is not None and hasattr(widget, 'full_init'):
+                    QTimer.singleShot(50, lambda w=widget: w.full_init(self._current_device, getattr(self, '_device_info', {})))
+            except Exception:
+                logger.exception('_on_tab_changed 调用 full_init 失败')
+        except Exception:
+            # 保护性捕获，避免UI崩溃
+            logger.exception("_on_tab_changed 处理失败")
+
+    def _open_startup_settings(self):
+        """打开启动行为设置对话框"""
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("启动行为")
+            layout = QVBoxLayout(dlg)
+
+            chk = QCheckBox("连接设备时自动创建并初始化 视频预览 和 批量下载 标签")
+            chk.setChecked(self._config.get("ui.auto_init_tabs_on_connect", False))
+            layout.addWidget(chk)
+
+            delay_row = QHBoxLayout()
+            delay_label = QLabel("延迟自动完成全初始化（秒）:")
+            delay_spin = QSpinBox()
+            delay_spin.setRange(0, 60)
+            delay_spin.setValue(self._config.get("ui.auto_init_tabs_on_connect_delay", 2))
+            delay_row.addWidget(delay_label)
+            delay_row.addWidget(delay_spin)
+            layout.addLayout(delay_row)
+
+            concurrent_row = QHBoxLayout()
+            concurrent_label = QLabel("最大并发初始化标签数:")
+            concurrent_spin = QSpinBox()
+            concurrent_spin.setRange(1, 4)
+            concurrent_spin.setValue(self._config.get("ui.auto_init_tabs_on_connect_max_concurrent", 1))
+            concurrent_row.addWidget(concurrent_label)
+            concurrent_row.addWidget(concurrent_spin)
+            layout.addLayout(concurrent_row)
+
+            btn_row = QHBoxLayout()
+            ok_btn = QPushButton("确定")
+            cancel_btn = QPushButton("取消")
+            btn_row.addStretch()
+            btn_row.addWidget(ok_btn)
+            btn_row.addWidget(cancel_btn)
+            layout.addLayout(btn_row)
+
+            def on_ok():
+                self._config.set("ui.auto_init_tabs_on_connect", bool(chk.isChecked()))
+                self._config.set("ui.auto_init_tabs_on_connect_delay", int(delay_spin.value()))
+                self._config.set("ui.auto_init_tabs_on_connect_max_concurrent", int(concurrent_spin.value()))
+                dlg.accept()
+
+            ok_btn.clicked.connect(on_ok)
+            cancel_btn.clicked.connect(dlg.reject)
+
+            dlg.exec()
+        except Exception:
+            logger.exception("打开启动行为设置失败")
+
+    # --- 延迟标签页工厂 -----------------------------------------------------------------
+    def _create_preview_tab(self):
+        widget = PreviewTabV2()
+        try:
+            if hasattr(widget, 'log_message'):
+                widget.log_message.connect(self.log)
+        except Exception:
+            pass
+        return widget
+
+    def _create_download_tab(self):
+        widget = DownloadTabV2(self._download_manager)
+        try:
+            if hasattr(widget, 'log_message'):
+                widget.log_message.connect(self.log)
+        except Exception:
+            pass
+        return widget
+
+    def _schedule_auto_full_init(self):
+        if not self._config.get("ui.auto_init_tabs_on_connect", False):
+            return
+
+        delay = int(self._config.get("ui.auto_init_tabs_on_connect_delay", 2))
+        self._auto_full_init_queue = []
+        self._auto_full_init_running = 0
+        self._auto_full_init_scheduled = True
+
+        self.log(f"将在 {delay} 秒后自动完成预览/下载标签的完整初始化")
+        self.status_bar.showMessage("将在自动初始化完成前保持此状态", min(delay * 1000, 10000))
+        QTimer.singleShot(delay * 1000, self._run_auto_full_init)
+
+    def _run_auto_full_init(self):
+        if not self._config.get("ui.auto_init_tabs_on_connect", False):
+            return
+
+        self._auto_full_init_scheduled = False
+        self.log("开始自动完成预览/下载标签的完整初始化")
+        self.status_bar.showMessage("开始自动完成标签完整初始化", 5000)
+        self._auto_full_init_queue = []
+        self._auto_full_init_running = 0
+
+        for attr_name in ('preview_tab', 'download_tab'):
+            widget = getattr(self, attr_name, None)
+            if widget is not None and hasattr(widget, 'full_init'):
+                self._auto_full_init_queue.append(widget)
+
+        if not self._auto_full_init_queue:
+            self.log("[提示] 无可自动初始化的标签页")
+            return
+
+        self._process_auto_full_init_queue()
+
+    def _process_auto_full_init_queue(self):
+        max_concurrent = max(1, int(self._config.get("ui.auto_init_tabs_on_connect_max_concurrent", 1)))
+        while self._auto_full_init_running < max_concurrent and self._auto_full_init_queue:
+            widget = self._auto_full_init_queue.pop(0)
+            self._auto_full_init_running += 1
+            QTimer.singleShot(0, lambda w=widget: self._execute_auto_full_init(w))
+
+    def _execute_auto_full_init(self, widget):
+        if widget is None:
+            self._auto_full_init_running = max(0, self._auto_full_init_running - 1)
+            return
+
+        widget_name = widget.__class__.__name__
+        try:
+            self.log(f"自动初始化 {widget_name}...")
+            widget.full_init(self._current_device, self._device_info or {})
+            self.log(f"{widget_name} 自动完整初始化完成")
+            self.status_bar.showMessage(f"{widget_name} 初始化完成", 3000)
+        except Exception:
+            logger.exception("自动 full_init 失败")
+            self.log(f"[错误] {widget_name} 自动初始化失败")
+        finally:
+            self._auto_full_init_running = max(0, self._auto_full_init_running - 1)
+            QTimer.singleShot(50, self._process_auto_full_init_queue)
+
+    def _create_manager_tab(self):
+        widget = DownloadManagerTabV2(self._download_manager)
+        try:
+            if hasattr(widget, 'log_message'):
+                widget.log_message.connect(self.log)
+        except Exception:
+            pass
+        return widget
+
+    def _create_terminal_tab(self):
+        widget = TerminalTab()
+        try:
+            if hasattr(widget, 'log_message'):
+                widget.log_message.connect(self.log)
+        except Exception:
+            pass
+        return widget
+
+    def _create_network_quality_tab(self):
+        widget = NetworkQualityTab()
+        return widget
+
+    def _create_speedtest_tab(self):
+        widget = SpeedtestTab()
+        return widget
+
+    def _create_ip_conflict_tab(self):
+        widget = IPConflictTab()
+        return widget
+
+    def _create_traffic_analysis_tab(self):
+        widget = TrafficAnalysisTab()
+        return widget
+
     def _create_log_panel(self) -> QWidget:
         """创建日志面板"""
         panel = QWidget()
-        panel.setStyleSheet("background:#fff; border-top: 1px solid #e0e0e0;")
+        panel.setObjectName("logPanel")
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(0)
         
         # 工具栏
         toolbar = QWidget()
-        toolbar.setStyleSheet("background:#f9f9f9; border-bottom: 1px solid #e0e0e0;")
+        toolbar.setObjectName("logToolbar")
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(10, 4, 10, 4)
         toolbar_layout.setSpacing(6)
         
         title_label = QLabel("运行日志")
-        title_label.setStyleSheet("font-weight:600; font-size:8pt; color:#333;")
+        title_label.setObjectName("logTitle")
         toolbar_layout.addWidget(title_label)
         toolbar_layout.addStretch()
         
         # 级别过滤
         self.log_level_combo = QComboBox()
+        self.log_level_combo.setObjectName("logLevelCombo")
         self.log_level_combo.addItems(["全部", "信息", "警告", "错误"])
         self.log_level_combo.setFixedHeight(22)
         self.log_level_combo.setFixedWidth(70)
-        self.log_level_combo.setStyleSheet(
-            "QComboBox{border:1px solid #ccc;border-radius:4px;font-size:8pt;padding:0 4px;background:#fff;}"
-        )
         self.log_level_combo.currentTextChanged.connect(self._render_log)
         toolbar_layout.addWidget(self.log_level_combo)
         
         # 搜索框
         self.log_search_input = QLineEdit()
+        self.log_search_input.setObjectName("logSearchInput")
         self.log_search_input.setPlaceholderText("搜索...")
         self.log_search_input.setFixedHeight(22)
         self.log_search_input.setFixedWidth(120)
-        self.log_search_input.setStyleSheet(
-            "QLineEdit{border:1px solid #ccc;border-radius:4px;font-size:8pt;padding:0 6px;background:#fff;}"
-        )
         self.log_search_input.textChanged.connect(self._render_log)
         toolbar_layout.addWidget(self.log_search_input)
         
         # 清空按钮
         clear_btn = QPushButton("清空")
+        clear_btn.setObjectName("logToolbarBtn")
         clear_btn.setFixedHeight(22)
         clear_btn.setFixedWidth(48)
-        clear_btn.setStyleSheet(LOG_TOOLBAR_BTN)
         clear_btn.clicked.connect(self._clear_log)
+        icons.set_button_icon(clear_btn, icons.Icon.CLEAR, size=14)
         toolbar_layout.addWidget(clear_btn)
-        
+
         # 导出按钮
         export_btn = QPushButton("导出")
+        export_btn.setObjectName("logToolbarBtn")
         export_btn.setFixedHeight(22)
         export_btn.setFixedWidth(48)
-        export_btn.setStyleSheet(LOG_TOOLBAR_BTN)
         export_btn.clicked.connect(self._export_log)
+        icons.set_button_icon(export_btn, icons.Icon.EXPORT, size=14)
         toolbar_layout.addWidget(export_btn)
         
         panel_layout.addWidget(toolbar)
@@ -337,49 +623,116 @@ class MainWindow(QMainWindow):
             self._device_info = device_info
             self.log(f"设备已连接: {device_info.get('ip', '')}")
             self.status_bar.showMessage(f"已连接到: {device_info.get('ip', '')}")
-            
-            # 启用相关标签页
-            self.tab_widget.setTabEnabled(2, True)  # 视频预览
-            self.tab_widget.setTabEnabled(3, True)  # 批量下载
-            
-            # 传递设备信息
-            self.preview_tab.set_device_info(device_info)
-            self.download_tab.set_device_info(device_info)
-            self._current_device = self.connection_tab.get_device()
-            self.preview_tab.set_device(self._current_device)
-            self.download_tab.set_device(self._current_device)
-            
+
+            # 根据设置决定是否自动初始化延迟标签页
+            auto_init = self._config.get("ui.auto_init_tabs_on_connect", False)
+
+            # 启用占位符标签（始终可见），索引固定为2/3
+            try:
+                self.tab_widget.setTabEnabled(2, True)  # 视频预览
+                self.tab_widget.setTabEnabled(3, True)  # 批量下载
+            except Exception:
+                pass
+
+            # 如果允许自动初始化，则确保真实页面已创建（使用轻量初始化策略）
+            if auto_init:
+                self._ensure_tab('preview_tab')
+                self._ensure_tab('download_tab')
+
+                # 轻量初始化：优先调用 widget.light_init(device, device_info)，否则仅更新显示信息（set_device_info）
+                preview_widget = getattr(self, 'preview_tab', None)
+                download_widget = getattr(self, 'download_tab', None)
+
+                self._current_device = self.connection_tab.get_device()
+
+                if preview_widget is not None:
+                    try:
+                        if hasattr(preview_widget, 'light_init'):
+                            # 使用短延时调度，避免阻塞 UI 初始化流程
+                            QTimer.singleShot(50, lambda w=preview_widget: w.light_init(self._current_device, device_info))
+                        else:
+                            if hasattr(preview_widget, 'set_device_info'):
+                                preview_widget.set_device_info(device_info)
+                    except Exception:
+                        logger.exception('preview_tab 轻量初始化失败')
+
+                if download_widget is not None:
+                    try:
+                        if hasattr(download_widget, 'light_init'):
+                            QTimer.singleShot(50, lambda w=download_widget: w.light_init(self._current_device, device_info))
+                        else:
+                            if hasattr(download_widget, 'set_device_info'):
+                                download_widget.set_device_info(device_info)
+                    except Exception:
+                        logger.exception('download_tab 轻量初始化失败')
+
+                # 根据配置调度自动完成完整初始化
+                self._schedule_auto_full_init()
+
+            else:
+                # 非自动初始化：只更新占位或已存在的小信息，不做耗时操作
+                preview_widget = getattr(self, 'preview_tab', None)
+                download_widget = getattr(self, 'download_tab', None)
+                self._current_device = self.connection_tab.get_device()
+                if preview_widget is not None and hasattr(preview_widget, 'set_device_info'):
+                    try:
+                        preview_widget.set_device_info(device_info)
+                    except Exception:
+                        logger.exception('preview_tab set_device_info 失败')
+                if download_widget is not None and hasattr(download_widget, 'set_device_info'):
+                    try:
+                        download_widget.set_device_info(device_info)
+                    except Exception:
+                        logger.exception('download_tab set_device_info 失败')
+
             # 更新全局状态
             self._app_state.set_device(self._current_device, device_info)
-            
-            # 切换到预览页
-            self.tab_widget.setCurrentWidget(self.preview_tab)
-            
-            # 发射信号
+
+            # 如果预览页面已存在或刚创建，则切换到预览页
+            if getattr(self, 'preview_tab', None) is not None:
+                try:
+                    self.tab_widget.setCurrentWidget(self.preview_tab)
+                except Exception:
+                    pass
+
+            # 发射信号和事件总线
             self.device_connected.emit(self._current_device, device_info)
-            
-            # 发布事件总线
             self._event_bus.emit(EventType.DEVICE_CONNECTED, {
                 "device": self._current_device,
                 "device_info": device_info
             })
         else:
             self._device_info = {}
+            self._current_device = None
             self.log("设备已断开")
             self.status_bar.showMessage("设备未连接")
-            
+
             # 禁用相关标签页
-            self.tab_widget.setTabEnabled(2, False)
-            self.tab_widget.setTabEnabled(3, False)
-            
-            self.preview_tab.set_device(None)
-            self.preview_tab.set_device_info({})
-            self.download_tab.set_device(None)
-            self.download_tab.set_device_info({})
-            
+            try:
+                self.tab_widget.setTabEnabled(2, False)
+                self.tab_widget.setTabEnabled(3, False)
+            except Exception:
+                pass
+
+            # 清理已初始化页面的设备引用（若存在）
+            preview_widget = getattr(self, 'preview_tab', None)
+            download_widget = getattr(self, 'download_tab', None)
+
+            if preview_widget is not None:
+                if hasattr(preview_widget, 'set_device'):
+                    preview_widget.set_device(None)
+                if hasattr(preview_widget, 'set_device_info'):
+                    preview_widget.set_device_info({})
+
+            if download_widget is not None:
+                if hasattr(download_widget, 'set_device'):
+                    download_widget.set_device(None)
+                if hasattr(download_widget, 'set_device_info'):
+                    download_widget.set_device_info({})
+
             # 更新全局状态
             self._app_state.set_device(None)
-            
+
             self.device_disconnected.emit()
             self._event_bus.emit(EventType.DEVICE_DISCONNECTED, {})
     
@@ -415,15 +768,10 @@ class MainWindow(QMainWindow):
     
     def _format_log_line(self, entry: dict) -> str:
         """格式化单条日志为 HTML"""
-        level_colors = {
-            'INFO': ('#e6f2ff', '#0078d4'),
-            'WARN': ('#fff4e0', '#d67f00'),
-            'ERROR': ('#fde7e9', '#c42b1c'),
-        }
-        bg, fg = level_colors.get(entry['level'], ('#f3f3f3', '#555'))
+        bg, fg = log_badge_colors(entry['level'])
         level_abbr = {'INFO': 'INFO', 'WARN': 'WARN', 'ERROR': 'ERR '}.get(entry['level'], entry['level'])
         return (
-            f'<span style="color:#888;">{entry["time"]}</span>&nbsp;'
+            f'<span style="color:{text_color("disabled")};">{entry["time"]}</span>&nbsp;'
             f'<span style="background:{bg};color:{fg};padding:0 3px;border-radius:2px;font-size:8pt;">{level_abbr}</span>&nbsp;'
             f'<span>{entry["text"]}</span>'
         )
@@ -474,7 +822,7 @@ class MainWindow(QMainWindow):
     
     def _apply_styles(self):
         """应用样式"""
-        self.setStyleSheet(MAIN_WINDOW)
+        self.setStyleSheet(get_global_stylesheet(self._theme_manager.colors()))
     
     def _attempt_auto_login(self):
         """尝试自动登录上次连接的设备"""
@@ -514,17 +862,17 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 20)
         
         title = QLabel("正在自动登录上次连接的设备...")
-        title.setStyleSheet("font-size: 14px; font-weight: bold; color: #333;")
+        title.setObjectName("autoLoginTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
         info = QLabel(f"IP地址: {ip}")
-        info.setStyleSheet("font-size: 12px; color: #666;")
+        info.setObjectName("autoLoginInfo")
         info.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(info)
         
         self._auto_login_countdown_label = QLabel("正在连接，请稍候...")
-        self._auto_login_countdown_label.setStyleSheet("font-size: 11px; color: #999;")
+        self._auto_login_countdown_label.setObjectName("autoLoginCountdown")
         self._auto_login_countdown_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._auto_login_countdown_label)
         
@@ -532,18 +880,7 @@ class MainWindow(QMainWindow):
         btn_layout.addStretch()
         
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f0f0f0;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                padding: 6px 20px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #e0e0e0;
-            }
-        """)
+        cancel_btn.setObjectName("autoLoginCancel")
         cancel_btn.clicked.connect(lambda: self._cancel_auto_login(dialog))
         btn_layout.addWidget(cancel_btn)
         
@@ -603,7 +940,7 @@ class MainWindow(QMainWindow):
         self._save_splitter_state()
         
         # 停止所有预览
-        if hasattr(self, 'preview_tab'):
+        if getattr(self, 'preview_tab', None) is not None:
             self.preview_tab.cleanup()
         
         # 停止所有下载
@@ -622,10 +959,12 @@ class MainWindow(QMainWindow):
         # 清理 SDK
         SDKLoader().cleanup()
         
-        # 清理新标签页资源
-        if hasattr(self, 'terminal_tab'):
-            self.terminal_tab.close()
-        if hasattr(self, 'traffic_analysis_tab'):
-            self.traffic_analysis_tab.close()
+        # 清理新标签页资源（懒加载标签页可能尚未实例化，需判空）
+        terminal_tab = getattr(self, 'terminal_tab', None)
+        if terminal_tab is not None:
+            terminal_tab.close()
+        traffic_analysis_tab = getattr(self, 'traffic_analysis_tab', None)
+        if traffic_analysis_tab is not None:
+            traffic_analysis_tab.close()
         
         event.accept()

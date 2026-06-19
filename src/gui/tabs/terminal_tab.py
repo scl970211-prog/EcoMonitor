@@ -20,8 +20,42 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QObject
 from PyQt6.QtGui import QFont, QTextCursor
 
 from ...utils.config import get_config
+from ..theme import set_status_style, terminal_color
 
 logger = logging.getLogger(__name__)
+
+try:
+    import paramiko
+except Exception:  # pragma: no cover - 可选依赖
+    paramiko = None
+
+
+class _ConfirmHostKeyPolicy(paramiko.MissingHostKeyPolicy if paramiko else object):
+    """连接未知 SSH 主机时提示用户确认主机密钥。"""
+
+    def __init__(self, parent_widget: QWidget):
+        super().__init__()
+        self._parent = parent_widget
+
+    def missing_host_key(self, client, hostname, key):
+        if paramiko is None:
+            return
+        fingerprint = key.get_fingerprint().hex(":").upper()
+        msg = (
+            f"主机 {hostname} 的 SSH 公钥指纹尚未记录：\n\n"
+            f"{fingerprint}\n\n"
+            "是否信任并继续连接？"
+        )
+        reply = QMessageBox.question(
+            self._parent,
+            "确认主机密钥",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            raise paramiko.SSHException(f"用户拒绝 {hostname} 的主机密钥")
+        client.get_host_keys().add(hostname, key.get_name(), key)
 
 
 class _Signaler(QObject):
@@ -169,7 +203,7 @@ class TerminalTab(QWidget):
         
         # 状态
         self.status_label = QLabel("未连接")
-        self.status_label.setStyleSheet("color: #999;")
+        set_status_style(self.status_label, "offline")
         layout.addWidget(self.status_label)
         
         layout.addStretch()
@@ -184,17 +218,9 @@ class TerminalTab(QWidget):
         
         # 终端输出
         self.terminal_output = QTextEdit()
+        self.terminal_output.setObjectName("terminal")
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setFont(QFont("Consolas", 10))
-        self.terminal_output.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid #333;
-                border-radius: 4px;
-                padding: 4px;
-            }
-        """)
         layout.addWidget(self.terminal_output)
         
         # 命令输入
@@ -259,10 +285,10 @@ class TerminalTab(QWidget):
             return
         
         try:
-            self._append_terminal(f"[INFO] 正在连接 SSH {host}:{port} ...\n", "#569cd6")
+            self._append_terminal(f"[INFO] 正在连接 SSH {host}:{port} ...\n", terminal_color("info"))
             
             self._ssh_client = paramiko.SSHClient()
-            self._ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self._ssh_client.set_missing_host_key_policy(_ConfirmHostKeyPolicy(self))
             self._ssh_client.connect(
                 hostname=host,
                 port=port,
@@ -281,13 +307,13 @@ class TerminalTab(QWidget):
             self._receive_thread.start()
             
             self._update_ui_connected(True)
-            self._append_terminal(f"[OK] SSH 连接成功: {host}:{port}\n", "#4ec9b0")
+            self._append_terminal(f"[OK] SSH 连接成功: {host}:{port}\n", terminal_color("success"))
             
             if self.save_session_cb.isChecked():
                 self._save_session("SSH", host, port, username)
             
         except Exception as e:
-            self._append_terminal(f"[ERROR] SSH 连接失败: {e}\n", "#f44747")
+            self._append_terminal(f"[ERROR] SSH 连接失败: {e}\n", terminal_color("error"))
             QMessageBox.critical(self, "连接失败", f"SSH 连接失败:\n{e}")
             self._cleanup_connection()
     
@@ -300,7 +326,7 @@ class TerminalTab(QWidget):
             return
         
         try:
-            self._append_terminal(f"[INFO] 正在连接 Telnet {host}:{port} ...\n", "#569cd6")
+            self._append_terminal(f"[INFO] 正在连接 Telnet {host}:{port} ...\n", terminal_color("info"))
             
             self._telnet_client = telnetlib.Telnet(host, port, timeout=10)
             
@@ -312,7 +338,7 @@ class TerminalTab(QWidget):
             self._receive_thread.start()
             
             self._update_ui_connected(True)
-            self._append_terminal(f"[OK] Telnet 连接成功: {host}:{port}\n", "#4ec9b0")
+            self._append_terminal(f"[OK] Telnet 连接成功: {host}:{port}\n", terminal_color("success"))
             
             if username:
                 time.sleep(0.5)
@@ -325,7 +351,7 @@ class TerminalTab(QWidget):
                 self._save_session("Telnet", host, port, username)
                 
         except Exception as e:
-            self._append_terminal(f"[ERROR] Telnet 连接失败: {e}\n", "#f44747")
+            self._append_terminal(f"[ERROR] Telnet 连接失败: {e}\n", terminal_color("error"))
             QMessageBox.critical(self, "连接失败", f"Telnet 连接失败:\n{e}")
             self._cleanup_connection()
     
@@ -348,7 +374,7 @@ class TerminalTab(QWidget):
                 break
         
         if self._is_connected:
-            self._append_terminal("\n[DISCONNECTED] 连接已断开\n", "#f44747")
+            self._append_terminal("\n[DISCONNECTED] 连接已断开\n", terminal_color("error"))
             self._signaler.disconnect.emit()
     
     def _receive_telnet_data(self):
@@ -366,7 +392,7 @@ class TerminalTab(QWidget):
                 break
         
         if self._is_connected:
-            self._append_terminal("\n[DISCONNECTED] 连接已断开\n", "#f44747")
+            self._append_terminal("\n[DISCONNECTED] 连接已断开\n", terminal_color("error"))
             self._signaler.disconnect.emit()
     
     def _on_send_command(self):
@@ -386,7 +412,7 @@ class TerminalTab(QWidget):
             
             self.cmd_input.clear()
         except Exception as e:
-            self._append_terminal(f"\n[ERROR] 发送失败: {e}\n", "#f44747")
+            self._append_terminal(f"\n[ERROR] 发送失败: {e}\n", terminal_color("error"))
     
     def _on_disconnect(self):
         """断开连接"""
@@ -396,8 +422,8 @@ class TerminalTab(QWidget):
         self._cleanup_connection()
         self._update_ui_connected(False)
         self.status_label.setText("未连接")
-        self.status_label.setStyleSheet("color: #999;")
-        self._append_terminal("[INFO] 已断开连接\n", "#ce9178")
+        set_status_style(self.status_label, "offline")
+        self._append_terminal("[INFO] 已断开连接\n", terminal_color("warning"))
     
     def _cleanup_connection(self):
         """清理连接资源"""
@@ -436,10 +462,10 @@ class TerminalTab(QWidget):
         
         if connected:
             self.status_label.setText("已连接")
-            self.status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            set_status_style(self.status_label, "online", bold=True)
         else:
             self.status_label.setText("未连接")
-            self.status_label.setStyleSheet("color: #999;")
+            set_status_style(self.status_label, "offline")
     
     def _append_terminal(self, text: str, color: str = None):
         """追加文本到终端"""
@@ -461,7 +487,7 @@ class TerminalTab(QWidget):
             # 处理特殊字符，保留 ANSI 颜色代码的基本处理
             safe_text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
             safe_text = safe_text.replace('\n', '<br>').replace(' ', '&nbsp;')
-            self.terminal_output.insertHtml(f'<span style="color:#d4d4d4;">{safe_text}</span>')
+            self.terminal_output.insertHtml(f'<span style="color:{terminal_color("text")};">{safe_text}</span>')
         
         # 自动滚动到底部
         scrollbar = self.terminal_output.verticalScrollBar()

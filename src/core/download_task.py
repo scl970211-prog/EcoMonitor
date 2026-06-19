@@ -3,12 +3,20 @@
 """
 
 import json
+import logging
 import os
 import uuid
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
+
+try:
+    from ..utils.crypto import decrypt_password, encrypt_password
+except ImportError:
+    from src.utils.crypto import decrypt_password, encrypt_password
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -219,6 +227,27 @@ class DownloadTask:
         if self.current_file_index >= self.matched_file_count:
             self.current_file_index = -1
 
+    @staticmethod
+    def _encrypt_password(plain: str) -> str:
+        if not plain:
+            return ""
+        try:
+            return encrypt_password(plain)
+        except Exception:
+            logger.exception("加密任务密码失败")
+            return ""
+
+    @staticmethod
+    def _decrypt_password(encrypted: str) -> str:
+        if not encrypted:
+            return ""
+        try:
+            return decrypt_password(encrypted)
+        except Exception:
+            # 旧版本可能以明文存储；安全起见不再使用明文，记录警告后返回空
+            logger.warning("任务密码解密失败，可能为旧版明文或已损坏")
+            return ""
+
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
@@ -226,7 +255,7 @@ class DownloadTask:
             "device_ip": self.device_ip,
             "device_port": self.device_port,
             "device_username": self.device_username,
-            "device_password": self.device_password,
+            "device_password": self._encrypt_password(self.device_password),
             "channel": self.channel,
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
@@ -262,7 +291,7 @@ class DownloadTask:
             device_ip=data.get("device_ip", ""),
             device_port=data.get("device_port", 8000),
             device_username=data.get("device_username", ""),
-            device_password=data.get("device_password", ""),
+            device_password=cls._decrypt_password(data.get("device_password", "")),
             channel=data.get("channel", 1),
             start_time=data.get("start_time", datetime.now()),
             end_time=data.get("end_time", datetime.now()),

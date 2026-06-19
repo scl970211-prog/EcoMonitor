@@ -7,6 +7,14 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+from ..theme import (
+    get_theme_manager,
+    rgba_color,
+    set_status_style,
+    set_text_style,
+    text_color,
+)
+
 
 class VideoWidget(QWidget):
     """单个视频显示窗格。"""
@@ -30,36 +38,23 @@ class VideoWidget(QWidget):
 
     def _init_ui(self):
         self.setAutoFillBackground(True)
+        tc = get_theme_manager().colors()
         palette = self.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(26, 26, 26))
+        palette.setColor(QPalette.ColorRole.Window, QColor(tc.video_bg))
         self.setPalette(palette)
-
-        self.setStyleSheet(
-            """
-            VideoWidget {
-                background-color: #1a1a1a;
-                border: 1px solid #333;
-            }
-            """
-        )
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(2)
 
         self.video_container = QWidget()
-        self.video_container.setStyleSheet(
-            """
-            background-color: #0d0d0d;
-            border: 1px solid #333;
-            """
-        )
+        self.video_container.setObjectName("videoContainer")
         self.video_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_container.setMinimumSize(120, 90)
         self.video_container.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.video_container.setAutoFillBackground(True)
         video_palette = self.video_container.palette()
-        video_palette.setColor(QPalette.ColorRole.Window, QColor(13, 13, 13))
+        video_palette.setColor(QPalette.ColorRole.Window, QColor(tc.video_container_bg))
         self.video_container.setPalette(video_palette)
         main_layout.addWidget(self.video_container, 1)
 
@@ -68,16 +63,16 @@ class VideoWidget(QWidget):
         info_layout.setSpacing(8)
 
         self.index_label = QLabel(f"{self._index + 1}")
-        self.index_label.setStyleSheet("color: #666; font-size: 10px; font-weight: bold;")
+        set_text_style(self.index_label, "secondary", size="10px", bold=True)
         info_layout.addWidget(self.index_label)
 
         self.name_label = QLabel("未分配")
-        self.name_label.setStyleSheet("color: #999; font-size: 11px;")
+        set_text_style(self.name_label, "secondary", size="11px")
         self.name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         info_layout.addWidget(self.name_label, 1)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #4CAF50; font-size: 10px;")
+        set_text_style(self.status_label, "success", size="10px")
         info_layout.addWidget(self.status_label)
 
         main_layout.addLayout(info_layout)
@@ -85,10 +80,10 @@ class VideoWidget(QWidget):
         self.loading_label = QLabel("连接中...")
         self.loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_label.setStyleSheet(
-            """
-            color: #4CAF50;
+            f"""
+            color: {tc.success};
             font-size: 12px;
-            background-color: rgba(0, 0, 0, 180);
+            background-color: {rgba_color(tc.video_container_bg, 200)};
             padding: 8px 16px;
             border-radius: 4px;
             """
@@ -111,7 +106,9 @@ class VideoWidget(QWidget):
         self._channel_id = channel_id
         self._channel_name = channel_name or f"通道{channel_id}"
         self.name_label.setText(self._channel_name)
-        self.name_label.setStyleSheet("color: #2196F3; font-size: 11px; font-weight: bold;")
+        self.name_label.setStyleSheet(
+            f"color: {text_color('primary_color')}; font-size: 11px; font-weight: bold;"
+        )
         self.set_status("loading")
 
     def bind_channel(self, channel_id: int, channel_name: str = ""):
@@ -125,16 +122,19 @@ class VideoWidget(QWidget):
         self._channel_name = ""
         self._preview_handle = -1
         self.name_label.setText("未分配")
-        self.name_label.setStyleSheet("color: #999; font-size: 11px;")
+        self.name_label.setStyleSheet(
+            f"color: {text_color('disabled')}; font-size: 11px;"
+        )
         self.set_status("idle")
         self.set_loading(False)
         self._clear_video_display()
 
     def _clear_video_display(self):
+        tc = get_theme_manager().colors()
         self.video_container.setStyleSheet(
-            """
-            background-color: #0d0d0d;
-            border: 1px solid #333;
+            f"""
+            background-color: {tc.video_container_bg};
+            border: 1px solid {tc.border};
             """
         )
         self.video_container.update()
@@ -174,37 +174,34 @@ class VideoWidget(QWidget):
 
     def set_selected(self, selected: bool):
         if selected:
-            self.setStyleSheet(
-                """
-                VideoWidget {
-                    background-color: #1a1a1a;
-                    border: 2px solid #0078d4;
-                }
-                """
-            )
+            self.setObjectName("selected")
         else:
-            self.setStyleSheet(
-                """
-                VideoWidget {
-                    background-color: #1a1a1a;
-                    border: 1px solid #333;
-                }
-                """
-            )
+            self.setObjectName("")
+        self.setStyleSheet(self.styleSheet())  # 触发样式重载
 
     def set_status(self, status: str, detail: str = ""):
-        status_styles = {
-            "previewing": ("●", "#4CAF50", "播放中"),
-            "online": ("●", "#4CAF50", "在线"),
-            "loading": ("●", "#ff9800", "连接中"),
-            "reconnecting": ("●", "#ff9800", "重连中"),
-            "error": ("✗", "#f44336", "错误"),
-            "offline": ("●", "#999999", "离线"),
-            "idle": ("", "#999999", ""),
+        status_roles = {
+            "previewing": "success",
+            "online": "success",
+            "loading": "warning",
+            "reconnecting": "warning",
+            "error": "error",
+            "offline": "secondary",
+            "idle": "secondary",
         }
-        symbol, color, tooltip_text = status_styles.get(status, status_styles["idle"])
-        self.status_label.setText(symbol)
-        self.status_label.setStyleSheet(f"color: {color}; font-size: 10px;")
+        tooltip_map = {
+            "previewing": "播放中",
+            "online": "在线",
+            "loading": "连接中",
+            "reconnecting": "重连中",
+            "error": "错误",
+            "offline": "离线",
+            "idle": "",
+        }
+        role = status_roles.get(status, "secondary")
+        tooltip_text = tooltip_map.get(status, "")
+        set_status_style(self.status_label, role, size="10px")
+        self.status_label.setText(tooltip_text)
         self.status_label.setToolTip(detail or tooltip_text)
 
     def get_win_id(self) -> int:
@@ -264,22 +261,18 @@ class VideoWidget(QWidget):
         if event.mimeData().hasText():
             text = event.mimeData().text()
             if ":" in text:
+                tc = get_theme_manager().colors()
                 event.acceptProposedAction()
                 self.video_container.setStyleSheet(
-                    """
-                    background-color: #0d3d0d;
-                    border: 2px solid #4CAF50;
+                    f"""
+                    background-color: {rgba_color(tc.success, 40)};
+                    border: 2px solid {tc.success};
                     """
                 )
 
     def dragLeaveEvent(self, event):
         if not self._is_loading:
-            self.video_container.setStyleSheet(
-                """
-                background-color: #0d0d0d;
-                border: 1px solid #333;
-                """
-            )
+            self._clear_video_display()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
@@ -287,12 +280,7 @@ class VideoWidget(QWidget):
 
     def dropEvent(self, event):
         if not self._is_loading:
-            self.video_container.setStyleSheet(
-                """
-                background-color: #0d0d0d;
-                border: 1px solid #333;
-                """
-            )
+            self._clear_video_display()
 
         if not event.mimeData().hasText():
             return

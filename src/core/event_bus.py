@@ -10,7 +10,7 @@ from typing import Dict, List, Callable, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 from queue import Queue, Empty
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, QThread, QRecursiveMutex, QMutexLocker
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,8 @@ class EventBus(QObject):
     event_posted = pyqtSignal(object)  # Event
     
     _instance = None
-    _mutex = QMutex()
-    
+    _mutex = QRecursiveMutex()
+
     def __new__(cls):
         if cls._instance is None:
             cls._mutex.lock()
@@ -68,18 +68,21 @@ class EventBus(QObject):
         
         # 订阅者: {event_type: [(handler_id, handler, priority, once)]}
         self._subscribers: Dict[str, List[tuple]] = {}
-        
+
         # 异步事件队列
         self._event_queue: Queue = Queue()
-        
+
         # 处理线程
         self._worker_thread: Optional[EventBusWorker] = None
         self._running = False
-        
+
         # 处理器ID映射
         self._handler_ids: Dict[str, tuple] = {}
-        
-        # 连接信号到处理
+
+        # 保护订阅者数据结构的递归锁
+        self._lock = QRecursiveMutex()
+
+        # 连接信号到处理（跨线程时 Qt 自动排队到 EventBus 所在线程）
         self.event_posted.connect(self._process_event)
         
         self._initialized = True
@@ -88,9 +91,9 @@ class EventBus(QObject):
     def start(self):
         """启动事件总线"""
         if not self._running:
+            self._running = True
             self._worker_thread = EventBusWorker(self)
             self._worker_thread.start()
-            self._running = True
             logger.info("EventBus 已启动")
     
     def stop(self):
@@ -101,6 +104,10 @@ class EventBus(QObject):
                 self._worker_thread.stop()
                 self._worker_thread.wait(5000)
             logger.info("EventBus 已停止")
+
+    def _with_lock(self):
+        """返回保护订阅者结构的锁上下文（兼容 Qt 锁）"""
+        return QMutexLocker(self._lock)
     
     # ========== 订阅功能 ==========
     
@@ -119,48 +126,51 @@ class EventBus(QObject):
             handler_id: 订阅ID，用于取消订阅
         """
         handler_id = str(uuid.uuid4())[:8]
-        
-        if event_type not in self._subscribers:
-            self._subscribers[event_type] = []
-        
-        # 按优先级插入
-        inserted = False
-        for i, (_, _, p, _) in enumerate(self._subscribers[event_type]):
-            if priority > p:
-                self._subscribers[event_type].insert(i, (handler_id, handler, priority, once))
-                inserted = True
-                break
-        
-        if not inserted:
-            self._subscribers[event_type].append((handler_id, handler, priority, once))
-        
-        self._handler_ids[handler_id] = (event_type, handler)
-        
+
+        with QMutexLocker(self._lock):
+            if event_type not in self._subscribers:
+                self._subscribers[event_type] = []
+
+            # 按优先级插入
+            inserted = False
+            for i, (_, _, p, _) in enumerate(self._subscribers[event_type]):
+                if priority > p:
+                    self._subscribers[event_type].insert(i, (handler_id, handler, priority, once))
+                    inserted = True
+                    break
+
+            if not inserted:
+                self._subscribers[event_type].append((handler_id, handler, priority, once))
+
+            self._handler_ids[handler_id] = (event_type, handler)
+
         logger.debug(f"订阅事件: {event_type}, handler: {handler_id}")
         return handler_id
     
     def unsubscribe(self, handler_id: str) -> bool:
         """
         取消订阅
-        
+
         Args:
             handler_id: 订阅时返回的ID
-        
+
         Returns:
             是否成功取消
         """
-        if handler_id not in self._handler_ids:
-            return False
-        
-        event_type, handler = self._handler_ids[handler_id]
-        
-        if event_type in self._subscribers:
-            self._subscribers[event_type] = [
-                (hid, h, p, o) for hid, h, p, o in self._subscribers[event_type]
-                if hid != handler_id
-            ]
-        
-        del self._handler_ids[handler_id]
+        with QMutexLocker(self._lock):
+            if handler_id not in self._handler_ids:
+                return False
+
+            event_type, handler = self._handler_ids[handler_id]
+
+            if event_type in self._subscribers:
+                self._subscribers[event_type] = [
+                    (hid, h, p, o) for hid, h, p, o in self._subscribers[event_type]
+                    if hid != handler_id
+                ]
+
+            del self._handler_ids[handler_id]
+
         logger.debug(f"取消订阅: {handler_id}")
         return True
     
@@ -192,8 +202,11 @@ class EventBus(QObject):
             # 异步模式：放入队列，由工作线程处理
             self._event_queue.put(event)
         else:
-            # 同步模式：直接处理
-            self._process_event(event)
+            # 同步模式：若调用线程与 EventBus 所在线程不同，通过信号跨线程投递
+            if QThread.currentThread() is not self.thread():
+                self.event_posted.emit(event)
+            else:
+                self._process_event(event)
     
     def post(self, event_type: str, data: Any = None, source: str = ""):
         """发布异步事件（便捷方法）"""
@@ -208,29 +221,37 @@ class EventBus(QObject):
     def _process_event(self, event: Event):
         """处理事件"""
         event_type = event.type
-        
-        # 获取订阅者
-        subscribers = self._subscribers.get(event_type, [])
-        
-        if not subscribers:
-            return
-        
-        # 调用处理函数
-        to_remove = []
-        
-        for handler_id, handler, priority, once in subscribers:
-            try:
-                handler(event)
-                
-                if once:
-                    to_remove.append(handler_id)
-                    
-            except Exception as e:
-                logger.error(f"事件处理错误 [{event_type}]: {e}")
-        
-        # 移除一次性订阅
-        for handler_id in to_remove:
-            self.unsubscribe(handler_id)
+
+        with QMutexLocker(self._lock):
+            # 获取订阅者快照
+            subscribers = list(self._subscribers.get(event_type, []))
+
+            if not subscribers:
+                return
+
+            # 调用处理函数
+            to_remove = []
+
+            for handler_id, handler, priority, once in subscribers:
+                try:
+                    handler(event)
+
+                    if once:
+                        to_remove.append(handler_id)
+
+                except Exception as e:
+                    logger.error(f"事件处理错误 [{event_type}]: {e}")
+
+            # 移除一次性订阅
+            for handler_id in to_remove:
+                if handler_id in self._handler_ids:
+                    event_type_rm, _ = self._handler_ids[handler_id]
+                    if event_type_rm in self._subscribers:
+                        self._subscribers[event_type_rm] = [
+                            (hid, h, p, o) for hid, h, p, o in self._subscribers[event_type_rm]
+                            if hid != handler_id
+                        ]
+                    del self._handler_ids[handler_id]
     
     def _process_async_events(self):
         """处理异步事件（在工作线程中调用）"""
@@ -253,7 +274,7 @@ class EventBus(QObject):
         用法：
             @event_bus.on('device_connected')
             def handler(event):
-                print(event.data)
+                logging.getLogger(__name__).info(event.data)
         """
         def decorator(func: Callable) -> Callable:
             self.subscribe(event_type, func, priority)
@@ -307,6 +328,7 @@ class EventBusWorker(QThread):
     def stop(self):
         """停止"""
         self._running = False
+        self._event_bus._running = False
 
 
 # ========== 预定义事件类型 ==========

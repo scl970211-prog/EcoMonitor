@@ -177,6 +177,8 @@ def get_ip_count(range_str: str) -> int:
             end = int(ipaddress.IPv4Address(parts[1].strip()))
             return end - start + 1
 
+        # 单个IP，先验证是否合法
+        ipaddress.IPv4Address(range_str.strip())
         return 1
 
     except Exception as e:
