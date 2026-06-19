@@ -54,7 +54,7 @@ class MainWindow(QMainWindow):
     """EcoMonitor 生态监控平台主窗口"""
     
     WINDOW_TITLE = "EcoMonitor 生态监控平台"
-    FOOTER_TEXT = "软件开发：中国水利水电科学研究院（技术人员：孙成龙）"
+    FOOTER_TEXT = "软件开发：际和（北京）科技有限责任公司（技术人员：孙成龙）"
     
     # 信号
     log_message = pyqtSignal(str)
