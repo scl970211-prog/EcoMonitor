@@ -2,13 +2,15 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSpinBox, QGroupBox,
+    QLineEdit, QPushButton, QSpinBox, QAbstractSpinBox, QGroupBox,
     QMessageBox, QFormLayout, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from ...core import Device, SDKLoader
+from ...core.constants import DEFAULT_SDK_PORT, DEFAULT_HTTP_PORT, DEFAULT_USERNAME
 from ...utils.config import get_config
+from ..theme import set_status_style
 
 
 class ConnectionTab(QWidget):
@@ -27,9 +29,9 @@ class ConnectionTab(QWidget):
     def _init_ui(self):
         device_config = self._config.get("device", {})
         default_ip = str(device_config.get("ip", "") or "")
-        default_port = int(device_config.get("port", 8000) or 8000)
-        default_http_port = int(device_config.get("http_port", 80) or 80)
-        default_username = str(device_config.get("username", "admin") or "admin")
+        default_port = int(device_config.get("port", DEFAULT_SDK_PORT) or DEFAULT_SDK_PORT)
+        default_http_port = int(device_config.get("http_port", DEFAULT_HTTP_PORT) or DEFAULT_HTTP_PORT)
+        default_username = str(device_config.get("username", DEFAULT_USERNAME) or DEFAULT_USERNAME)
         default_password = str(device_config.get("password", "") or "")
 
         layout = QVBoxLayout(self)
@@ -38,12 +40,26 @@ class ConnectionTab(QWidget):
         
         # 连接参数组
         conn_group = QGroupBox("连接参数")
+        conn_group.setMaximumWidth(720)
         form_layout = QFormLayout(conn_group)
+        form_layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        
+        inner_container = QWidget()
+        inner_layout = QHBoxLayout(inner_container)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(20)
+        inner_layout.addStretch()
+        inner_layout.addWidget(conn_group)
+        inner_layout.addStretch()
+        layout.addWidget(inner_container)
         
         # IP 地址
         self.ip_input = QLineEdit()
         self.ip_input.setPlaceholderText("例如: 192.168.1.64")
         self.ip_input.setText(default_ip)
+        self.ip_input.setMinimumWidth(280)
+        self.ip_input.setMaximumWidth(420)
         form_layout.addRow("IP 地址:", self.ip_input)
         
         # SDK 端口（设备连接端口）
@@ -51,6 +67,8 @@ class ConnectionTab(QWidget):
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(default_port)
         self.port_input.setToolTip("设备 SDK 连接端口，默认 8000")
+        self.port_input.setMinimumWidth(140)
+        self.port_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         form_layout.addRow("SDK 端口:", self.port_input)
         
         # HTTP 端口（ISAPI 端口）
@@ -58,6 +76,8 @@ class ConnectionTab(QWidget):
         self.http_port_input.setRange(1, 65535)
         self.http_port_input.setValue(default_http_port)
         self.http_port_input.setToolTip("ISAPI/HTTP 端口，用于获取通道名称和状态，默认 80")
+        self.http_port_input.setMinimumWidth(140)
+        self.http_port_input.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         form_layout.addRow("HTTP 端口:", self.http_port_input)
         
         # 用户名
@@ -91,14 +111,14 @@ class ConnectionTab(QWidget):
         self.auto_play_checkbox.stateChanged.connect(self._on_auto_play_changed)
         form_layout.addRow("自动播放:", self.auto_play_checkbox)
         
-        layout.addWidget(conn_group)
+        # conn_group 已在上方以居中方式加入到 inner_container 中，无需再次添加
         
         # 按钮组
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
         self.connect_btn = QPushButton("连接设备")
-        self.connect_btn.setStyleSheet("font-size: 14px; padding: 10px 30px;")
+        self.connect_btn.setObjectName("largePrimaryBtn")
         self.connect_btn.clicked.connect(self._on_connect)
         btn_layout.addWidget(self.connect_btn)
         
@@ -110,7 +130,7 @@ class ConnectionTab(QWidget):
 
         # 内联连接状态标签
         self.conn_status_label = QLabel("未连接")
-        self.conn_status_label.setStyleSheet("color: #999; font-size: 8pt;")
+        set_status_style(self.conn_status_label, "offline", size="8pt")
         btn_layout.addWidget(self.conn_status_label)
 
         btn_layout.addStretch()
@@ -122,11 +142,11 @@ class ConnectionTab(QWidget):
 
         self.device_info_placeholder = QLabel("连接设备后显示详情")
         self.device_info_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.device_info_placeholder.setStyleSheet("color: #bbb; font-size: 9pt;")
+        set_status_style(self.device_info_placeholder, "offline", size="9pt")
         status_layout.addRow(self.device_info_placeholder)
 
         self.status_label = QLabel("未连接")
-        self.status_label.setStyleSheet("color: red; font-weight: bold;")
+        set_status_style(self.status_label, "error", bold=True)
         status_layout.addRow("连接状态:", self.status_label)
         
         self.device_type_label = QLabel("-")
@@ -233,7 +253,7 @@ class ConnectionTab(QWidget):
                 QMessageBox.critical(self, "错误", f"SDK 加载失败: {e}")
             else:
                 self.status_label.setText("自动连接失败，请检测连接参数。")
-                self.status_label.setStyleSheet("color: #c42b1c; font-weight: bold;")
+                set_status_style(self.status_label, "error", bold=True)
             return False
 
         self._device = Device(ip, port, username, password, http_port)
@@ -246,7 +266,7 @@ class ConnectionTab(QWidget):
                 self._save_connection_settings(ip, port, http_port, username, password)
                 self._update_ui_connected()
                 self.conn_status_label.setText(f"已连接 {ip}:{port}")
-                self.conn_status_label.setStyleSheet("color: #107c10; font-size: 8pt; font-weight: bold;")
+                set_status_style(self.conn_status_label, "online", size="8pt", bold=True)
                 info = self._get_device_info()
                 self.connection_changed.emit(True, info)
                 self.log_message.emit(f"设备连接成功: {ip}")
@@ -273,12 +293,12 @@ class ConnectionTab(QWidget):
         self.log_message.emit("设备已断开")
         if auto:
             self.status_label.setText("自动连接失败，请检测连接参数。")
-            self.status_label.setStyleSheet("color: #c42b1c; font-weight: bold;")
+            set_status_style(self.status_label, "error", bold=True)
             self.conn_status_label.setText("自动连接失败")
-            self.conn_status_label.setStyleSheet("color: #c42b1c; font-size: 8pt;")
+            set_status_style(self.conn_status_label, "error", size="8pt")
         else:
             self.conn_status_label.setText("连接失败")
-            self.conn_status_label.setStyleSheet("color: #c42b1c; font-size: 8pt;")
+            set_status_style(self.conn_status_label, "error", size="8pt")
     
     def _on_disconnect(self):
         """断开连接"""
@@ -293,7 +313,7 @@ class ConnectionTab(QWidget):
         """更新 UI 为已连接状态"""
         self.device_info_placeholder.hide()
         self.status_label.setText("已连接")
-        self.status_label.setStyleSheet("color: green; font-weight: bold;")
+        set_status_style(self.status_label, "online", bold=True)
         
         self.connect_btn.setEnabled(False)
         self.disconnect_btn.setEnabled(True)
@@ -331,9 +351,9 @@ class ConnectionTab(QWidget):
         """更新 UI 为未连接状态"""
         self.device_info_placeholder.show()
         self.conn_status_label.setText("未连接")
-        self.conn_status_label.setStyleSheet("color: #999; font-size: 8pt;")
+        set_status_style(self.conn_status_label, "offline", size="8pt")
         self.status_label.setText("未连接")
-        self.status_label.setStyleSheet("color: red; font-weight: bold;")
+        set_status_style(self.status_label, "error", bold=True)
         
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -386,8 +406,8 @@ class ConnectionTab(QWidget):
         return {
             'ip': self._device.ip,
             'port': self._device.port,
+            'http_port': self._device.http_port,
             'username': self._device.username,
-            'password': self._device.password,
             'serial': bytes(info.sSerialNumber).decode('utf-8', errors='ignore').strip('\x00'),
             'channel_count': self._device.get_channel_count(),
             'analog_channels': int(info.byChanNum),

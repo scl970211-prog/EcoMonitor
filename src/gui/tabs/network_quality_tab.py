@@ -21,9 +21,11 @@ from PyQt6.QtWidgets import (
     QHeaderView, QGroupBox, QSpinBox, QProgressBar,
     QMessageBox, QSplitter, QTextEdit, QComboBox
 )
+from PyQt6.QtWidgets import QAbstractSpinBox
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QObject
 
 from ...utils.config import get_config
+from ..theme import set_status_style
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +137,8 @@ class NetworkQualityTab(QWidget):
         self.ping_count = QSpinBox()
         self.ping_count.setRange(1, 100)
         self.ping_count.setValue(10)
+        self.ping_count.setMinimumWidth(110)
+        self.ping_count.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         param_layout.addWidget(self.ping_count)
         
         param_layout.addWidget(QLabel("超时:"))
@@ -142,6 +146,8 @@ class NetworkQualityTab(QWidget):
         self.ping_timeout.setRange(1, 10)
         self.ping_timeout.setValue(3)
         self.ping_timeout.setSuffix("秒")
+        self.ping_timeout.setMinimumWidth(110)
+        self.ping_timeout.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         param_layout.addWidget(self.ping_timeout)
         param_layout.addStretch()
         ping_layout.addLayout(param_layout)
@@ -185,7 +191,7 @@ class NetworkQualityTab(QWidget):
         
         # 状态
         self.status_label = QLabel("就绪")
-        self.status_label.setStyleSheet("color: #999;")
+        set_status_style(self.status_label, "offline")
         layout.addWidget(self.status_label)
         
         layout.addStretch()
@@ -284,7 +290,7 @@ class NetworkQualityTab(QWidget):
         self.progress_bar.setMaximum(len(targets))
         self.progress_bar.setValue(0)
         self.status_label.setText("测试中...")
-        self.status_label.setStyleSheet("color: #2196F3;")
+        set_status_style(self.status_label, "info")
         
         self.result_table.setRowCount(0)
         
@@ -494,7 +500,7 @@ class NetworkQualityTab(QWidget):
         
         self.mtu_btn.setEnabled(False)
         self.mtu_result_label.setText("MTU 测试中...")
-        self.mtu_result_label.setStyleSheet("color: #2196F3;")
+        set_status_style(self.mtu_result_label, "info")
         
         thread = threading.Thread(target=self._mtu_worker, args=(host,), daemon=True)
         thread.start()
@@ -562,14 +568,15 @@ class NetworkQualityTab(QWidget):
                 )
                 
                 success = result.returncode == 0
-                if not success:
-                    # Windows 下需要/需要检查 frag 相关输出
+                if success and system == "Windows":
+                    # Windows 下即使 returncode 为 0，输出中包含分段提示也说明包被拆分/不可达
                     output_lower = result.stdout.lower()
-                    if system == "Windows":
-                        if "fragment" in output_lower or "需要分段" in output_lower or "packet needs to be fragmented" in output_lower:
-                            success = False
-                        else:
-                            success = True
+                    if (
+                        "fragment" in output_lower
+                        or "需要分段" in output_lower
+                        or "packet needs to be fragmented" in output_lower
+                    ):
+                        success = False
                 
                 if success:
                     best = mid
@@ -604,7 +611,7 @@ class NetworkQualityTab(QWidget):
         """停止测试"""
         self._stop_test = True
         self.status_label.setText("已停止")
-        self.status_label.setStyleSheet("color: #999;")
+        set_status_style(self.status_label, "offline")
     
     def _on_test_finished(self):
         """测试完成"""
@@ -613,4 +620,4 @@ class NetworkQualityTab(QWidget):
         self.stop_ping_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.status_label.setText("测试完成")
-        self.status_label.setStyleSheet("color: #4CAF50;")
+        set_status_style(self.status_label, "success")

@@ -32,6 +32,11 @@ try:
 except ImportError:
     from src.core import DownloadManager, DownloadTask
 
+try:
+    from ..theme import task_status_color, task_status_surface
+except ImportError:
+    from src.gui.theme import task_status_color, task_status_surface
+
 
 class DownloadManagerTabV2(QWidget):
     """下载管理标签页。"""
@@ -40,6 +45,7 @@ class DownloadManagerTabV2(QWidget):
         super().__init__()
         self._download_manager = download_manager
         self._speed_samples = {}
+        self._task_rows: dict[str, dict] = {}
         self._init_ui()
         self._connect_signals()
 
@@ -171,34 +177,41 @@ class DownloadManagerTabV2(QWidget):
             task_id: sample for task_id, sample in self._speed_samples.items() if task_id in active_task_ids
         }
 
+        desired_ids = [task.task_id for task in tasks]
+        current_ids = set(self._task_rows.keys())
+        desired_set = set(desired_ids)
+
+        # 删除已不存在的任务行（从后往前删，避免索引变化）
+        rows_to_remove = sorted(
+            (tid for tid in current_ids if tid not in desired_set),
+            key=lambda tid: self._task_rows[tid]["row"],
+            reverse=True,
+        )
+        for tid in rows_to_remove:
+            old_widget = self.task_table.cellWidget(self._task_rows[tid]["row"], 8)
+            if old_widget is not None:
+                old_widget.deleteLater()
+            self.task_table.removeRow(self._task_rows[tid]["row"])
+            del self._task_rows[tid]
+        self._rebuild_row_indices()
+
+        # 新增任务行（追加到末尾）
+        for task in tasks:
+            if task.task_id not in self._task_rows:
+                row = self.task_table.rowCount()
+                self.task_table.insertRow(row)
+                self._create_task_row(row, task)
+                self._task_rows[task.task_id] = {"row": row, "last_status": task.status}
+        self._rebuild_row_indices()
+
+        # 增量更新已有行
         pending = active = completed = failed = 0
         total_progress_sum = 0
-        self.task_table.setRowCount(len(tasks))
-
-        for row, task in enumerate(tasks):
-            self.task_table.setItem(row, 0, QTableWidgetItem(task.task_id))
-            self.task_table.setItem(row, 1, QTableWidgetItem(f"CH{task.channel:02d}"))
-            time_str = f"{task.start_time.strftime('%m-%d %H:%M')} ~ {task.end_time.strftime('%m-%d %H:%M')}"
-            self.task_table.setItem(row, 2, QTableWidgetItem(time_str))
-            self.task_table.setItem(row, 3, QTableWidgetItem(self._format_segment_info(task)))
-            self.task_table.setItem(row, 4, QTableWidgetItem(self._format_total_size(task.total_bytes)))
-
-            status_item = QTableWidgetItem(self._get_status_text(task))
-            status_item.setForeground(QColor(self._get_status_color(task.status)))
-            self.task_table.setItem(row, 5, status_item)
-
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, 100)
-            progress_bar.setValue(int(task.progress or 0))
-            progress_bar.setFormat(f"{int(task.progress or 0)}%")
-            self.task_table.setCellWidget(row, 6, progress_bar)
-
-            speed_text = "-"
-            if task.status == DownloadTask.STATUS_DOWNLOADING:
-                speed_text = self._format_task_speed(task.task_id, task.downloaded_bytes, now)
-            self.task_table.setItem(row, 7, QTableWidgetItem(speed_text))
-
-            self.task_table.setCellWidget(row, 8, self._build_action_widget(task))
+        for task in tasks:
+            row_info = self._task_rows[task.task_id]
+            row = row_info["row"]
+            self._update_task_row_data(row, task, now, row_info)
+            row_info["last_status"] = task.status
 
             if task.status == DownloadTask.STATUS_PENDING:
                 pending += 1
@@ -220,6 +233,71 @@ class DownloadManagerTabV2(QWidget):
         self.completed_label.setText(f"已完成: {completed}")
         self.failed_label.setText(f"失败: {failed}")
         self.total_progress.setValue((total_progress_sum // len(tasks)) if tasks else 0)
+
+    def _rebuild_row_indices(self):
+        """根据当前表格行顺序重建 task_id -> row 映射。"""
+        for row in range(self.task_table.rowCount()):
+            item = self.task_table.item(row, 0)
+            if item is not None:
+                tid = item.text()
+                if tid in self._task_rows:
+                    self._task_rows[tid]["row"] = row
+
+    def _create_task_row(self, row: int, task: DownloadTask):
+        """创建新任务行控件（仅首次插入时调用）。"""
+        self.task_table.setItem(row, 0, QTableWidgetItem(task.task_id))
+        self.task_table.setItem(row, 1, QTableWidgetItem(f"CH{task.channel:02d}"))
+        self.task_table.setItem(row, 2, QTableWidgetItem(self._format_time_range(task)))
+        self.task_table.setItem(row, 3, QTableWidgetItem(self._format_segment_info(task)))
+        self.task_table.setItem(row, 4, QTableWidgetItem(self._format_total_size(task.total_bytes)))
+
+        status_item = QTableWidgetItem(self._get_status_text(task))
+        status_item.setForeground(QColor(self._get_status_color(task.status)))
+        self.task_table.setItem(row, 5, status_item)
+
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        progress_bar.setValue(int(task.progress or 0))
+        progress_bar.setFormat(f"{int(task.progress or 0)}%")
+        self.task_table.setCellWidget(row, 6, progress_bar)
+
+        speed_item = QTableWidgetItem("-")
+        self.task_table.setItem(row, 7, speed_item)
+
+        self.task_table.setCellWidget(row, 8, self._build_action_widget(task))
+
+    def _update_task_row_data(self, row: int, task: DownloadTask, now: float, row_info: dict):
+        """更新已有任务行数据，仅在状态变化时重建操作按钮。"""
+        self.task_table.item(row, 1).setText(f"CH{task.channel:02d}")
+        self.task_table.item(row, 2).setText(self._format_time_range(task))
+        self.task_table.item(row, 3).setText(self._format_segment_info(task))
+        self.task_table.item(row, 4).setText(self._format_total_size(task.total_bytes))
+
+        status_item = self.task_table.item(row, 5)
+        status_item.setText(self._get_status_text(task))
+        status_item.setForeground(QColor(self._get_status_color(task.status)))
+
+        progress_bar = self.task_table.cellWidget(row, 6)
+        if isinstance(progress_bar, QProgressBar):
+            progress_bar.setValue(int(task.progress or 0))
+            progress_bar.setFormat(f"{int(task.progress or 0)}%")
+
+        speed_text = "-"
+        if task.status == DownloadTask.STATUS_DOWNLOADING:
+            speed_text = self._format_task_speed(task.task_id, task.downloaded_bytes, now)
+        self.task_table.item(row, 7).setText(speed_text)
+
+        if row_info.get("last_status") != task.status:
+            old_widget = self.task_table.cellWidget(row, 8)
+            if old_widget is not None:
+                old_widget.deleteLater()
+            self.task_table.setCellWidget(row, 8, self._build_action_widget(task))
+
+    def _format_time_range(self, task: DownloadTask) -> str:
+        return (
+            f"{task.start_time.strftime('%m-%d %H:%M')} ~ "
+            f"{task.end_time.strftime('%m-%d %H:%M')}"
+        )
 
     def _build_action_widget(self, task: DownloadTask):
         widget = QWidget()
@@ -321,18 +399,8 @@ class DownloadManagerTabV2(QWidget):
             return f"{base}（第 {task.failed_segment_index + 1} 段）"
         return base
 
-    def _get_status_color(self, status: str):
-        color_map = {
-            DownloadTask.STATUS_PENDING: "#666666",
-            DownloadTask.STATUS_DOWNLOADING: "#0078d4",
-            DownloadTask.STATUS_CONVERTING: "#7b61ff",
-            DownloadTask.STATUS_RECONNECTING: "#d67f00",
-            DownloadTask.STATUS_COMPLETED: "#107c10",
-            DownloadTask.STATUS_FAILED: "#c42b1c",
-            DownloadTask.STATUS_PAUSED: "#d67f00",
-            DownloadTask.STATUS_CANCELLED: "#999999",
-        }
-        return color_map.get(status, "#1f1f1f")
+    def _get_status_color(self, status: str) -> str:
+        return task_status_color(status)
 
     def _show_context_menu(self, position):
         row = self.task_table.rowAt(position.y())
@@ -438,43 +506,48 @@ class DownloadManagerTabV2(QWidget):
             # 确定状态
             if index < task.completed_segments:
                 status = "已完成"
-                status_color = QColor("#107c10")  # 绿色
+                segment_status = "completed"
+                status_color = QColor(task_status_color(segment_status))
             elif index == task.current_file_index and task.status in [
-                DownloadTask.STATUS_DOWNLOADING, 
-                DownloadTask.STATUS_CONVERTING, 
+                DownloadTask.STATUS_DOWNLOADING,
+                DownloadTask.STATUS_CONVERTING,
                 DownloadTask.STATUS_RECONNECTING
             ]:
                 if task.status == DownloadTask.STATUS_DOWNLOADING:
                     status = "下载中"
+                    segment_status = "downloading"
                 elif task.status == DownloadTask.STATUS_CONVERTING:
                     status = "转换中"
+                    segment_status = "converting"
                 elif task.status == DownloadTask.STATUS_RECONNECTING:
                     status = "重连中"
+                    segment_status = "reconnecting"
                 else:
                     status = "进行中"
-                status_color = QColor("#0078d4")  # 蓝色
+                    segment_status = "downloading"
+                status_color = QColor(task_status_color(segment_status))
             else:
                 status = "排队中"
-                status_color = QColor("#666666")  # 灰色
-            
+                segment_status = "pending"
+                status_color = QColor(task_status_color(segment_status))
+
             # 创建状态项（带颜色）
             status_item = QTableWidgetItem(status)
             status_item.setForeground(status_color)
             status_item.setFont(QFont("Microsoft YaHei", 9, QFont.Bold if status in ["下载中", "转换中", "重连中"] else QFont.Normal))
-            
+
             table.setItem(index, 0, QTableWidgetItem(str(index + 1)))
             table.setItem(index, 1, QTableWidgetItem(filename))
             table.setItem(index, 2, QTableWidgetItem(f"{size_mb:.2f} MB"))
             table.setItem(index, 3, QTableWidgetItem(start_text))
             table.setItem(index, 4, QTableWidgetItem(end_text))
             table.setItem(index, 5, status_item)
-            
-            # 根据状态设置行背景色（已完成的行为淡绿色）
-            if index < task.completed_segments:
-                for col in range(6):
-                    item = table.item(index, col)
-                    if item:
-                        item.setBackground(QColor("#f0f9f0"))  # 淡绿色背景
+
+            # 根据状态设置行背景色
+            for col in range(6):
+                item = table.item(index, col)
+                if item:
+                    item.setBackground(QColor(task_status_surface(segment_status)))
         layout.addWidget(table)
 
         close_btn = QPushButton("关闭")

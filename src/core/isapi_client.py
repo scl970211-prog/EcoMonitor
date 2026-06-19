@@ -10,6 +10,12 @@ from typing import Dict, List, Optional
 import requests
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,10 +24,23 @@ class ISAPIClient:
 
     NS = {"hik": "http://www.hikvision.com/ver20/XMLSchema"}
 
-    def __init__(self, ip: str, port: int = 80, username: str = "", password: str = ""):
-        self.base_url = f"http://{ip}:{port}"
+    def __init__(
+        self,
+        ip: str,
+        port: int = 80,
+        username: str = "",
+        password: str = "",
+        use_https: bool = True,
+        verify: bool = False,
+    ):
+        self._ip = ip
+        self._http_port = port
         self.username = username
         self.password = password
+        self._use_https = use_https
+        self._verify = verify
+        self.base_url = ""
+
         self.session = requests.Session()
         self.session.auth = HTTPDigestAuth(username, password)
         self.session.headers.update(
@@ -31,13 +50,17 @@ class ISAPIClient:
                 "Content-Type": "application/xml; charset=UTF-8",
             }
         )
+        self.session.verify = verify
         self._connected = False
         self._auth_type: Optional[str] = None
 
-    def connect(self) -> bool:
-        """测试 ISAPI 是否可用。"""
+    def _try_base_url(self, base_url: str) -> bool:
+        """尝试使用指定 URL 连接 ISAPI。"""
+        self.base_url = base_url
         try:
-            response = self.session.get(f"{self.base_url}/ISAPI/System/deviceInfo", timeout=5)
+            response = self.session.get(
+                f"{self.base_url}/ISAPI/System/deviceInfo", timeout=5
+            )
             if response.status_code == 200:
                 self._connected = True
                 self._auth_type = "digest"
@@ -45,15 +68,37 @@ class ISAPIClient:
 
             if response.status_code == 401:
                 self.session.auth = HTTPBasicAuth(self.username, self.password)
-                response = self.session.get(f"{self.base_url}/ISAPI/System/deviceInfo", timeout=5)
+                response = self.session.get(
+                    f"{self.base_url}/ISAPI/System/deviceInfo", timeout=5
+                )
                 if response.status_code == 200:
                     self._connected = True
                     self._auth_type = "basic"
                     return True
             return False
         except Exception as exc:
-            logger.debug("ISAPI connect failed %s: %s", self.base_url, exc)
+            logger.debug("ISAPI connect failed %s: %s", base_url, exc)
             return False
+
+    def connect(self) -> bool:
+        """测试 ISAPI 是否可用。优先 HTTPS，失败则降级到 HTTP 并记录安全警告。"""
+        if self._use_https:
+            if self._try_base_url(f"https://{self._ip}:443"):
+                logger.info("ISAPI 通过 HTTPS 连接成功: %s", self.base_url)
+                return True
+            logger.warning("ISAPI HTTPS 连接失败，尝试降级到 HTTP: %s", self._ip)
+
+        if self._try_base_url(f"http://{self._ip}:{self._http_port}"):
+            if self._use_https:
+                logger.warning(
+                    "ISAPI 已通过 HTTP 明文传输（%s），建议设备启用 HTTPS",
+                    self.base_url,
+                )
+            else:
+                logger.info("ISAPI 通过 HTTP 连接成功: %s", self.base_url)
+            return True
+
+        return False
 
     def get_channel_name(self, channel_id: int) -> Optional[str]:
         """获取指定通道名称。"""

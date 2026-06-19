@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QPushButton, QLineEdit, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QGroupBox, QCheckBox,
-    QSpinBox, QMessageBox, QMenu, QApplication, QSplitter
+    QSpinBox, QAbstractSpinBox, QMessageBox, QMenu, QApplication, QSplitter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QUrl
 from PyQt6.QtGui import QDesktopServices
@@ -201,6 +201,8 @@ class DeviceScanTab(QWidget):
         self.timeout_spin.setRange(1, 10)
         self.timeout_spin.setValue(1)
         self.timeout_spin.setSuffix("秒")
+        self.timeout_spin.setMinimumWidth(110)
+        self.timeout_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         timeout_layout.addWidget(self.timeout_spin)
         timeout_layout.addStretch()
         options_layout.addLayout(timeout_layout)

@@ -53,8 +53,10 @@ EcoMonitor/
 pip install -r requirements.txt
 ```
 
-3. （可选）安装 Npcap，用于流量分析功能：
+3. （可选）安装 Npcap，用于流量分析/抓包功能：
    https://npcap.com/#download
+   
+   使用安装包部署时，安装向导会提示安装 Npcap；商业/政府大规模部署请购买 Npcap OEM 授权。
 
 ## 运行程序
 

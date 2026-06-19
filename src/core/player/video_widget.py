@@ -6,11 +6,13 @@
 import logging
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPainter, QColor, QFont
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtOpenGL import QOpenGLTexture
+
+from ...gui.theme import get_theme_manager
 
 logger = logging.getLogger(__name__)
 
@@ -180,33 +182,34 @@ class VideoWidget(QWidget):
         layout.addWidget(self.video_render, 1)
         
         # 信息标签
+        tc = get_theme_manager().colors()
         self.info_label = QLabel(f"窗口 {self.index + 1}")
-        self.info_label.setStyleSheet("""
-            QLabel {
-                color: #ccc;
-                background-color: #2d2d2d;
+        self.info_label.setStyleSheet(f"""
+            QLabel {{
+                color: {tc.text_secondary};
+                background-color: {tc.panel};
                 padding: 4px 8px;
                 font-size: 11px;
-            }
+            }}
         """)
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.info_label)
-        
+
         # 默认样式
-        self.setStyleSheet("""
-            VideoWidget {
-                background-color: #1a1a1a;
-                border: 2px solid #333;
-            }
-            VideoWidget:hover {
-                border: 2px solid #666;
-            }
-            VideoWidget[active="true"] {
-                border: 2px solid #4CAF50;
-            }
-            VideoWidget[selected="true"] {
-                border: 2px solid #2196F3;
-            }
+        self.setStyleSheet(f"""
+            VideoWidget {{
+                background-color: {tc.video_bg};
+                border: 2px solid {tc.border};
+            }}
+            VideoWidget:hover {{
+                border: 2px solid {tc.text_disabled};
+            }}
+            VideoWidget[active="true"] {{
+                border: 2px solid {tc.success};
+            }}
+            VideoWidget[selected="true"] {{
+                border: 2px solid {tc.primary};
+            }}
         """)
         
         self.setProperty("active", False)

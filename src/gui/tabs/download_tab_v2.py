@@ -2,6 +2,7 @@
 批量下载标签页。
 """
 
+import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -32,6 +33,18 @@ except ImportError:
     from src.core import Device, DownloadManager, DownloadTask, get_temp_dir
     from src.core.format_converter import FormatConverter
 
+try:
+    from ..theme import get_theme_manager, set_status_style, set_text_style, text_color
+    from ...utils.config import get_config
+    from ...utils.crypto import decrypt_password
+except ImportError:
+    from src.gui.theme import get_theme_manager, set_status_style, set_text_style, text_color
+    from src.utils.config import get_config
+    from src.utils.crypto import decrypt_password
+
+
+logger = logging.getLogger(__name__)
+
 
 class DownloadTabV2(QWidget):
     """批量下载标签页。"""
@@ -40,13 +53,10 @@ class DownloadTabV2(QWidget):
     CHANNEL_ID_ROLE = Qt.ItemDataRole.UserRole
     CHANNEL_NAME_ROLE = Qt.ItemDataRole.UserRole + 1
     CHANNEL_STATS_ROLE = Qt.ItemDataRole.UserRole + 2
-    SMALL_BUTTON_STYLE = (
-        "QPushButton{padding: 2px 10px; font-size: 9pt; min-height: 28px;}"
-        "QPushButton:disabled{padding: 2px 10px; min-height: 28px;}"
-    )
+    _tc = get_theme_manager().colors()
     PRIMARY_BUTTON_STYLE = (
         "QPushButton{font-size: 14px; padding: 10px 30px;}"
-        "QPushButton:disabled{background-color: #bfbfbf; color: #666666;}"
+        f"QPushButton:disabled{{background-color: {_tc.text_disabled}; color: {_tc.text_secondary};}}"
     )
 
     def __init__(self, download_manager: DownloadManager):
@@ -85,16 +95,16 @@ class DownloadTabV2(QWidget):
         channel_btn_layout.setSpacing(4)
 
         select_all_btn = QPushButton("全选")
+        select_all_btn.setObjectName("smallBtn")
         select_all_btn.setMinimumHeight(30)
         select_all_btn.setMinimumWidth(64)
-        select_all_btn.setStyleSheet(self.SMALL_BUTTON_STYLE)
         select_all_btn.clicked.connect(self.channel_list.selectAll)
         channel_btn_layout.addWidget(select_all_btn)
 
         deselect_all_btn = QPushButton("全不选")
+        deselect_all_btn.setObjectName("smallBtn")
         deselect_all_btn.setMinimumHeight(30)
         deselect_all_btn.setMinimumWidth(76)
-        deselect_all_btn.setStyleSheet(self.SMALL_BUTTON_STYLE)
         deselect_all_btn.clicked.connect(self.channel_list.clearSelection)
         channel_btn_layout.addWidget(deselect_all_btn)
 
@@ -131,7 +141,7 @@ class DownloadTabV2(QWidget):
         task_layout.addWidget(browse_btn, 3, 3)
 
         self.disk_space_label = QLabel("")
-        self.disk_space_label.setStyleSheet("color: #666; font-size: 8pt; padding-left: 4px;")
+        self.disk_space_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 8pt; padding-left: 4px;")
         task_layout.addWidget(self.disk_space_label, 4, 1, 1, 3)
         layout.addWidget(task_group)
 
@@ -152,7 +162,7 @@ class DownloadTabV2(QWidget):
         hint_layout.setContentsMargins(0, 0, 0, 0)
         hint_layout.addStretch()
         self.storage_hint_label = QLabel("请先检索录像")
-        self.storage_hint_label.setStyleSheet("color: #666; font-size: 10pt; padding: 0 8px;")
+        self.storage_hint_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 10pt; padding: 0 8px;")
         hint_layout.addWidget(self.storage_hint_label)
         hint_layout.addStretch()
         layout.addLayout(hint_layout)
@@ -162,7 +172,7 @@ class DownloadTabV2(QWidget):
         btn_layout.setSpacing(10)
         btn_layout.addStretch()
         self.retrieve_btn = QPushButton("检索录像")
-        self.retrieve_btn.setStyleSheet("font-size: 13px; padding: 10px 24px;")
+        self.retrieve_btn.setObjectName("largeSecondaryBtn")
         self.retrieve_btn.clicked.connect(self._retrieve_recordings)
         btn_layout.addWidget(self.retrieve_btn)
         self.add_task_btn = QPushButton("下载录像")
@@ -184,7 +194,7 @@ class DownloadTabV2(QWidget):
         else:
             tips_text += "4. FFmpeg 未安装，当前仅导出 DAV 文件。"
         tips = QLabel(tips_text)
-        tips.setStyleSheet("color: gray; font-size: 11px;")
+        tips.setStyleSheet(f"color: {text_color('disabled')}; font-size: 11px;")
         tips.setWordWrap(True)
         layout.addWidget(tips)
 
@@ -204,6 +214,32 @@ class DownloadTabV2(QWidget):
     def set_device(self, device: Device):
         self._device = device
 
+    def light_init(self, device: Device, device_info: dict):
+        """轻量初始化：仅保存设备引用并更新显示信息"""
+        try:
+            self._device = device
+            self.set_device_info(device_info or {})
+        except Exception:
+            self.log_message.emit("[错误] DownloadTabV2 轻量初始化失败")
+
+    def full_init(self, device: Device, device_info: dict):
+        """完整初始化：确保设备引用和设备信息均同步"""
+        try:
+            self._device = device
+            self.set_device_info(device_info or {})
+        except Exception:
+            self.log_message.emit("[错误] DownloadTabV2 全部初始化失败")
+
+    def _get_device_password(self) -> str:
+        """从加密配置中读取当前设备密码，避免在 device_info 中明文传播。"""
+        try:
+            encrypted = get_config().get("device.password")
+            if encrypted:
+                return decrypt_password(encrypted)
+        except Exception:
+            logger.exception("解密设备密码失败")
+        return ""
+
     def _clear_channel_cache(self):
         self._channel_file_cache.clear()
 
@@ -214,7 +250,7 @@ class DownloadTabV2(QWidget):
             self.add_task_btn.setEnabled(False)
         if hasattr(self, "storage_hint_label"):
             self.storage_hint_label.setText("请先检索录像")
-            self.storage_hint_label.setStyleSheet("color: #666; font-size: 10pt; padding: 0 8px;")
+            self.storage_hint_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 10pt; padding: 0 8px;")
 
     def _cache_key(self, channel_id: int, start_dt, end_dt) -> Tuple[int, str, str]:
         return (channel_id, start_dt.isoformat(), end_dt.isoformat())
@@ -306,7 +342,7 @@ class DownloadTabV2(QWidget):
             self.add_task_btn.setEnabled(False)
             if hasattr(self, "storage_hint_label"):
                 self.storage_hint_label.setText("请先选择保存目录")
-                self.storage_hint_label.setStyleSheet("color: #666; font-size: 10pt; padding: 0 8px;")
+                self.storage_hint_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 10pt; padding: 0 8px;")
             return
 
         try:
@@ -332,7 +368,7 @@ class DownloadTabV2(QWidget):
             self._storage_ready = free_gb >= estimated_gb and has_retrieval
 
             self.disk_space_label.setText(f"当前目录可用空间: {free_gb:.1f} GB")
-            self.disk_space_label.setStyleSheet("color: #666; font-size: 8pt; padding-left: 4px;")
+            self.disk_space_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 8pt; padding-left: 4px;")
 
             if has_retrieval:
                 remaining_gb = free_gb - estimated_gb
@@ -340,12 +376,12 @@ class DownloadTabV2(QWidget):
                     f"所需空间: {estimated_gb:.1f} GB   预计剩余: {remaining_gb:.1f} GB"
                 )
                 if free_gb < estimated_gb:
-                    self.storage_hint_label.setStyleSheet("color: #c42b1c; font-size: 10pt; padding: 0 8px;")
+                    self.storage_hint_label.setStyleSheet(f"color: {text_color('error')}; font-size: 10pt; padding: 0 8px;")
                 else:
-                    self.storage_hint_label.setStyleSheet("color: #2d6a4f; font-size: 10pt; padding: 0 8px;")
+                    self.storage_hint_label.setStyleSheet(f"color: {text_color('success')}; font-size: 10pt; padding: 0 8px;")
             else:
                 self.storage_hint_label.setText("请先检索录像")
-                self.storage_hint_label.setStyleSheet("color: #666; font-size: 10pt; padding: 0 8px;")
+                self.storage_hint_label.setStyleSheet(f"color: {text_color('secondary')}; font-size: 10pt; padding: 0 8px;")
             self.add_task_btn.setEnabled(self._storage_ready)
         except Exception:
             self.disk_space_label.setText("")
@@ -353,18 +389,23 @@ class DownloadTabV2(QWidget):
             self.add_task_btn.setEnabled(False)
             if hasattr(self, "storage_hint_label"):
                 self.storage_hint_label.setText("空间信息获取失败")
-                self.storage_hint_label.setStyleSheet("color: #c42b1c; font-size: 10pt; padding: 0 8px;")
+                self.storage_hint_label.setStyleSheet(f"color: {text_color('error')}; font-size: 10pt; padding: 0 8px;")
 
     def _get_search_device(self):
         if self._device and self._device.is_connected:
             return self._device, False
 
+        password = self._get_device_password()
+        if not password:
+            raise RuntimeError("未能从配置中读取设备密码，请重新连接设备")
+
+        http_port = self._device_info.get("http_port", 80)
         search_device = Device(
             ip=self._device_info["ip"],
             port=self._device_info["port"],
-            http_port=80,
+            http_port=http_port,
             username=self._device_info["username"],
-            password=self._device_info["password"],
+            password=password,
         )
         search_device.login()
         return search_device, True
@@ -520,6 +561,11 @@ class DownloadTabV2(QWidget):
             QMessageBox.warning(self, "提示", "请重新检索录像后再下载")
             return
 
+        password = self._get_device_password()
+        if not password:
+            QMessageBox.warning(self, "提示", "未能从配置中读取设备密码，请重新连接设备")
+            return
+
         task_count = 0
         total_segments = 0
         total_bytes = 0
@@ -530,7 +576,7 @@ class DownloadTabV2(QWidget):
                 device_ip=self._device_info["ip"],
                 device_port=self._device_info["port"],
                 device_username=self._device_info["username"],
-                device_password=self._device_info["password"],
+                device_password=password,
                 channel=channel_info["channel_id"],
                 start_time=start_dt,
                 end_time=end_dt,

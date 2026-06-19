@@ -20,6 +20,9 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
+from ..theme import set_status_style
+from ...core.constants import DSCP_NAMES
+
 logger = logging.getLogger(__name__)
 
 
@@ -159,26 +162,26 @@ class PacketCaptureTab(QWidget):
         # 检测 Wireshark
         self._wireshark_path = self._find_wireshark()
         if self._wireshark_path:
-            self.wireshark_status.setText(f"Wireshark: ✅ 已找到 ({self._wireshark_path})")
-            self.wireshark_status.setStyleSheet("color: #4CAF50;")
+            self.wireshark_status.setText(f"Wireshark: 已找到 ({self._wireshark_path})")
+            set_status_style(self.wireshark_status, "success")
             self.start_wireshark_btn.setEnabled(True)
         else:
-            self.wireshark_status.setText("Wireshark: ❌ 未安装")
-            self.wireshark_status.setStyleSheet("color: #f44336;")
+            self.wireshark_status.setText("Wireshark: 未安装")
+            set_status_style(self.wireshark_status, "error")
             self.start_wireshark_btn.setEnabled(False)
         
         # 检测 tshark
         self._tshark_path = self._find_tshark()
         if self._tshark_path:
-            self.tshark_status.setText(f"tshark: ✅ 已找到 ({self._tshark_path})")
-            self.tshark_status.setStyleSheet("color: #4CAF50;")
+            self.tshark_status.setText(f"tshark: 已找到 ({self._tshark_path})")
+            set_status_style(self.tshark_status, "success")
             self.start_tshark_btn.setEnabled(True)
             self.protocol_stats_btn.setEnabled(True)
             self.dscp_stats_btn.setEnabled(True)
             self.conversation_btn.setEnabled(True)
         else:
-            self.tshark_status.setText("tshark: ❌ 未安装")
-            self.tshark_status.setStyleSheet("color: #f44336;")
+            self.tshark_status.setText("tshark: 未安装")
+            set_status_style(self.tshark_status, "error")
             self.start_tshark_btn.setEnabled(False)
             self.protocol_stats_btn.setEnabled(False)
             self.dscp_stats_btn.setEnabled(False)
@@ -186,11 +189,11 @@ class PacketCaptureTab(QWidget):
         
         # 检测 Npcap
         if self._check_npcap():
-            self.npcap_status.setText("Npcap: ✅ 已安装")
-            self.npcap_status.setStyleSheet("color: #4CAF50;")
+            self.npcap_status.setText("Npcap: 已安装")
+            set_status_style(self.npcap_status, "success")
         else:
-            self.npcap_status.setText("Npcap: ❌ 未安装 (抓包需要)")
-            self.npcap_status.setStyleSheet("color: #f44336;")
+            self.npcap_status.setText("Npcap: 未安装 (抓包需要)")
+            set_status_style(self.npcap_status, "error")
     
     def _find_wireshark(self) -> str:
         """查找 Wireshark 安装路径"""
@@ -268,41 +271,39 @@ class PacketCaptureTab(QWidget):
         return None
     
     def _check_npcap(self) -> bool:
-        """检测 Npcap 是否安装"""
+        """检测 Npcap 是否安装
+
+        WinPcap 已停止维护并被官方弃用，因此仅检测 Npcap。
+        参考：https://npcap.com/
+        """
         system = platform.system()
         if system != "Windows":
             return True  # Linux/macOS 使用 libpcap，通常已安装
-        
+
         try:
-            # 检查 Npcap 服务或 DLL
             import winreg
+
+            # 检查 Npcap 注册表项
             try:
                 key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Npcap")
                 winreg.CloseKey(key)
                 return True
             except FileNotFoundError:
                 pass
-            
-            # 检查 winpcap
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WinPcap")
-                winreg.CloseKey(key)
-                return True
-            except FileNotFoundError:
-                pass
-            
-            # 检查 system32 下的 dll
+
+            # 检查常见路径下的 Npcap DLL
             dll_paths = [
                 r"C:\Windows\System32\Npcap\wpcap.dll",
+                r"C:\Windows\SysWOW64\Npcap\wpcap.dll",
                 r"C:\Windows\System32\wpcap.dll",
             ]
             for p in dll_paths:
                 if os.path.exists(p):
                     return True
-                    
+
         except Exception:
             pass
-        
+
         return False
     
     def _on_start_wireshark(self):
@@ -446,13 +447,7 @@ class PacketCaptureTab(QWidget):
             self.analyze_table.setItem(row, 1, QTableWidgetItem(str(count)))
             
             dscp_int = int(dscp) if dscp.isdigit() else -1
-            name = {
-                0: "CS0 / BE", 8: "CS1", 10: "AF11", 12: "AF12", 14: "AF13",
-                16: "CS2", 18: "AF21", 20: "AF22", 22: "AF23",
-                24: "CS3", 26: "AF31", 28: "AF32", 30: "AF33",
-                32: "CS4", 34: "AF41", 36: "AF42", 38: "AF43",
-                40: "CS5", 44: "VA", 46: "EF", 48: "CS6", 56: "CS7"
-            }.get(dscp_int, "未知")
+            name = DSCP_NAMES.get(dscp_int, "未知")
             self.analyze_table.setItem(row, 2, QTableWidgetItem(name))
         
         self._log("DSCP 统计完成")

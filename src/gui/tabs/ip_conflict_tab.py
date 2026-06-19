@@ -13,13 +13,14 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QGroupBox, QProgressBar, QMessageBox,
-    QSplitter, QCheckBox, QSpinBox
+    QSplitter, QCheckBox, QSpinBox, QAbstractSpinBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 from ...core.scanner.enhanced_scanner import EnhancedScanner
 from ...core.scanner.network_utils import get_local_networks, parse_ip_range
 from ...utils.config import get_config
+from ..theme import set_status_style
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,8 @@ class IPConflictTab(QWidget):
         self.timeout_spin.setRange(1, 10)
         self.timeout_spin.setValue(1)
         self.timeout_spin.setSuffix("秒")
+        self.timeout_spin.setMinimumWidth(110)
+        self.timeout_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         timeout_layout.addWidget(self.timeout_spin)
         timeout_layout.addStretch()
         options_layout.addLayout(timeout_layout)
@@ -221,7 +224,7 @@ class IPConflictTab(QWidget):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.stats_label.setText("扫描中...")
-        self.stats_label.setStyleSheet("color: #2196F3;")
+        set_status_style(self.stats_label, "info")
         
         self.conflict_table.setRowCount(0)
         self.rogue_table.setRowCount(0)
@@ -251,7 +254,7 @@ class IPConflictTab(QWidget):
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.stats_label.setText("已停止")
-        self.stats_label.setStyleSheet("color: #999;")
+        set_status_style(self.stats_label, "offline")
     
     def _on_scan_finished(self):
         """扫描完成"""
@@ -260,7 +263,7 @@ class IPConflictTab(QWidget):
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
         self.stats_label.setText("扫描完成")
-        self.stats_label.setStyleSheet("color: #4CAF50;")
+        set_status_style(self.stats_label, "success")
         
         self._analyze_conflicts()
     
@@ -297,7 +300,7 @@ class IPConflictTab(QWidget):
                     self.conflict_table.setItem(row, 1, QTableWidgetItem(unique_macs[0]))
                     self.conflict_table.setItem(row, 2, QTableWidgetItem(unique_macs[1]))
                     
-                    risk_item = QTableWidgetItem("⚠️ 高")
+                    risk_item = QTableWidgetItem("高 (风险)")
                     risk_item.setForeground(Qt.GlobalColor.red)
                     self.conflict_table.setItem(row, 3, risk_item)
             

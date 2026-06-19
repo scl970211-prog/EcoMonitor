@@ -864,7 +864,6 @@ class Device(QObject):
             "port": self.port,
             "http_port": self.http_port,
             "username": self.username,
-            "password": self.password,
             "serial": serial,
             "serial_number": serial,
             "device_type": device_type,

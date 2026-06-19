@@ -20,8 +20,34 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, QMutex, QWaitCondition
 from .sdk_loader import SDKLoader
 from .format_converter import FormatConverter
 from .device import Device
+from .path_resolver import get_data_dir
+
+try:
+    from ..utils.crypto import decrypt_password, encrypt_password
+except ImportError:
+    from src.utils.crypto import decrypt_password, encrypt_password
 
 logger = logging.getLogger(__name__)
+
+
+def _encrypt_password(plain: str) -> str:
+    if not plain:
+        return ""
+    try:
+        return encrypt_password(plain)
+    except Exception:
+        logger.exception("加密段任务密码失败")
+        return ""
+
+
+def _decrypt_password(encrypted: str) -> str:
+    if not encrypted:
+        return ""
+    try:
+        return decrypt_password(encrypted)
+    except Exception:
+        logger.warning("段任务密码解密失败，可能为旧版明文或已损坏")
+        return ""
 
 
 class SegmentStatus(Enum):
@@ -453,7 +479,7 @@ class SegmentDownloadManager(QObject):
                 "saved_at": datetime.now().isoformat(),
             }
             
-            # 转换不可序列化的对象
+            # 转换不可序列化的对象，并对密码加密
             config = state["task"].get("config")
             if config:
                 state["task"]["config"] = {
@@ -461,7 +487,7 @@ class SegmentDownloadManager(QObject):
                     "device_ip": config.device_ip,
                     "device_port": config.device_port,
                     "device_username": config.device_username,
-                    "device_password": config.device_password,
+                    "device_password": _encrypt_password(config.device_password),
                     "channel": config.channel,
                     "save_dir": config.save_dir,
                     "convert_to_mp4": config.convert_to_mp4,
@@ -471,7 +497,7 @@ class SegmentDownloadManager(QObject):
             state_file = self._get_state_file_path(task_id)
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
-                
+
         except Exception as e:
             logger.error(f"保存任务状态失败: {e}")
     
@@ -488,9 +514,14 @@ class SegmentDownloadManager(QObject):
                         state = json.load(f)
                     
                     task_id = state["task"]["config"]["task_id"]
-                    
+
                     # 恢复段列表
                     segments = [DownloadSegment.from_dict(s) for s in state["segments"]]
+
+                    # 状态文件中的密码为加密存储，恢复时解密
+                    state["task"]["config"]["device_password"] = _decrypt_password(
+                        state["task"]["config"].get("device_password", "")
+                    )
                     
                     # 检查是否有未完成的段
                     pending = [s for s in segments if s.status not in 
@@ -526,7 +557,7 @@ class SegmentDownloadManager(QObject):
     
     def _get_state_dir(self) -> Path:
         """获取状态目录"""
-        state_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / "HikvisionTool" / "tasks"
+        state_dir = get_data_dir() / "task_states"
         state_dir.mkdir(parents=True, exist_ok=True)
         return state_dir
     

@@ -13,6 +13,7 @@ EcoMonitor 生态监控平台 - 主程序入口 (PyQt6 整合版)
 
 import sys
 import os
+import logging
 import traceback
 from pathlib import Path
 
@@ -41,12 +42,12 @@ def show_startup_error(title: str, message: str):
         except Exception:
             pass
     
-    # 控制台输出
-    print(f"\n{'='*60}", file=sys.stderr)
-    print(f"启动错误: {title}", file=sys.stderr)
-    print('='*60, file=sys.stderr)
-    print(message, file=sys.stderr)
-    print('='*60, file=sys.stderr)
+    # 控制台输出（日志初始化前使用默认 handler）
+    logging.error("\n%s", '=' * 60)
+    logging.error("启动错误: %s", title)
+    logging.error('%s', '=' * 60)
+    logging.error("%s", message)
+    logging.error('%s', '=' * 60)
 
 
 def main():
@@ -105,6 +106,16 @@ def main():
 
     app = QApplication(sys.argv)
 
+    # 设置应用图标（任务栏 & 窗口左上角）
+    try:
+        from PyQt6.QtGui import QIcon
+        from src.core.path_resolver import get_app_dir
+        icon_path = get_app_dir() / "assets" / "icon.ico"
+        if icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
+    except Exception:
+        pass
+
     # 设置应用字体
     try:
         font = QFont("Microsoft YaHei", 9)
@@ -123,9 +134,10 @@ def main():
     try:
         from PyQt6.QtWidgets import QSplashScreen
         from PyQt6.QtGui import QPixmap
+        from src.core.path_resolver import get_app_dir
         splash_candidates = [
-            Path(__file__).resolve().parent / "assets" / "splash.png",
-            Path(__file__).resolve().parent / "assets" / "splash.jpg",
+            get_app_dir() / "assets" / "splash.png",
+            get_app_dir() / "assets" / "splash.jpg",
         ]
         for candidate in splash_candidates:
             if candidate.exists():

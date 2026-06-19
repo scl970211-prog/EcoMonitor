@@ -18,6 +18,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from .device_info import Device, get_resolver
 from .device_fingerprint import DeviceFingerprinter, get_fingerprinter
+from .fast_scanner import FastScanner
 from .network_utils import parse_ip_range, get_ip_count, get_local_networks
 
 logger = logging.getLogger(__name__)
@@ -441,6 +442,7 @@ class EnhancedScanner(QObject):
         """扫描工作线程 - 优化版：先 ONVIF 快速发现，再深度扫描"""
         try:
             processed = 0
+            skipped_count = 0
             all_devices: Dict[str, 'Device'] = {}
             
             # ========== 第一阶段：ONVIF WS-Discovery 快速发现 ==========
@@ -470,15 +472,15 @@ class EnhancedScanner(QObject):
                             all_devices[od.ip] = device
                             self.devices_found.emit([device])
                     
+                    skipped_count = len(all_devices)
                     logger.info(f"ONVIF 发现 {len(onvif_devices)} 台设备，"
-                                f"其中 {len(all_devices)} 台在目标范围内")
+                                f"其中 {skipped_count} 台在目标范围内")
                 except Exception as e:
                     logger.debug(f"ONVIF 扫描失败: {e}")
             # ==========================================================
             
-            # 更新进度（ONVIF 阶段快速完成，不占用大量进度）
-            if all_devices:
-                self.progress_update.emit(min(len(all_devices), total_count), total_count)
+            if skipped_count:
+                self.progress_update.emit(min(skipped_count, total_count), total_count)
             
             # ========== 第二阶段：ICMP + TCP 深度扫描（兜底） ==========
             # 排除已被 ONVIF 发现的 IP
@@ -497,8 +499,8 @@ class EnhancedScanner(QObject):
                     self.devices_found.emit(devices)
                 
                 processed += len(batch)
-                current_progress = len(all_devices) + processed
-                self.progress_update.emit(min(current_progress, total_count), total_count)
+                current_progress = min(skipped_count + processed, total_count)
+                self.progress_update.emit(current_progress, total_count)
             
             # 最后统一做主机名解析（只对 ONVIF/ICMP 发现但没解析到主机名的设备）
             unresolved = [d for d in all_devices.values() if not d.hostname]
@@ -514,34 +516,38 @@ class EnhancedScanner(QObject):
             self.scan_finished.emit()
     
     def _scan_batch(self, ip_batch: List[str]) -> List[Device]:
-        """扫描一批 IP - 优化策略：ARP缓存优先 + ICMP + TCP兜底"""
+        """扫描一批 IP - 优化策略：ARP缓存优先 + FastScanner ICMP/TCP 兜底"""
         found_devices: Dict[str, Device] = {}
         
         # 1. 先读取 ARP 缓存获取已知设备（包含MAC地址）
         arp_cached_devices = {}
         if self.use_arp:
             try:
-                # 获取当前批次的 ARP 缓存
                 arp_cached_devices = self._arp_scanner.scan_batch(ip_batch, self.timeout)
-                # 同时获取所有缓存中的设备（用于补充）
-                all_cached = self._arp_scanner.get_all_cached_devices()
-                arp_cached_devices.update(all_cached)
             except Exception as e:
                 logger.debug(f"读取 ARP 缓存失败: {e}")
         
-        # 2. ICMP 批量探测（最快速，跳过 ARP 已知的设备）
-        icmp_results = {}
-        if self.use_icmp:
-            # ICMP 扫描 ARP 中没有的设备
-            icmp_ips = [ip for ip in ip_batch if ip not in arp_cached_devices]
-            if icmp_ips:
-                icmp_results = self._icmp_scanner.scan_batch(icmp_ips, self.timeout)
-                for ip, result in icmp_results.items():
-                    device = Device(ip)
+        # 2. 使用 FastScanner 优化 ICMP/TCP 扫描
+        scan_ips = [ip for ip in ip_batch if ip not in arp_cached_devices]
+        if scan_ips and (self.use_icmp or self.use_tcp):
+            try:
+                fast_scanner = FastScanner(timeout=self.timeout, max_workers=min(120, max(10, len(scan_ips))))
+                scan_results = fast_scanner.scan_batch(
+                    scan_ips,
+                    use_icmp=self.use_icmp,
+                    use_tcp=self.use_tcp,
+                )
+                for result in scan_results:
+                    if not result.is_online:
+                        continue
+                    device = Device(result.ip)
                     device.is_online = True
                     device.response_time = result.response_time
                     device.scan_method = result.scan_method
-                    found_devices[ip] = device
+                    device.open_ports = result.open_ports
+                    found_devices[result.ip] = device
+            except Exception as e:
+                logger.debug(f"FastScanner 扫描失败: {e}")
         
         # 3. 将 ARP 缓存中的设备添加到结果（标记为在线）
         for ip, mac in arp_cached_devices.items():
@@ -553,11 +559,12 @@ class EnhancedScanner(QObject):
                 device.scan_method = "ARP"
                 found_devices[ip] = device
         
-        # 4. 为 ICMP 发现的设备补充 ARP 信息
+        # 4. 为 ICMP/TCP 发现的设备补充 ARP 信息
         if self.use_arp and found_devices:
             try:
                 arp_results = self._arp_scanner.scan_batch(
-                    list(found_devices.keys()), self.timeout
+                    [ip for ip in found_devices if not found_devices[ip].mac],
+                    self.timeout,
                 )
                 for ip, mac in arp_results.items():
                     if ip in found_devices and not found_devices[ip].mac:
@@ -566,40 +573,11 @@ class EnhancedScanner(QObject):
             except Exception as e:
                 logger.debug(f"ARP 补充扫描失败: {e}")
         
-        # 5. TCP 批量探测（对 ICMP 和 ARP 都未发现的 IP 进行兜底）
-        if self.use_tcp:
-            unchecked_ips = [ip for ip in ip_batch if ip not in found_devices]
-            if unchecked_ips:
-                tcp_results = self._tcp_scanner.scan_batch(unchecked_ips, self.timeout)
-                
-                # 为 TCP 发现的设备补充 ARP 信息
-                if self.use_arp and tcp_results:
-                    try:
-                        arp_results_2 = self._arp_scanner.scan_batch(
-                            list(tcp_results.keys()), self.timeout
-                        )
-                        for ip, mac in arp_results_2.items():
-                            if ip in tcp_results:
-                                tcp_results[ip].mac = self._normalize_mac(mac)
-                                tcp_results[ip].vendor = self._get_vendor(mac)
-                    except Exception:
-                        pass
-                
-                for ip, result in tcp_results.items():
-                    if ip not in found_devices:
-                        device = Device(ip)
-                        device.is_online = True
-                        device.scan_method = result.scan_method
-                        device.open_ports = result.open_ports
-                        device.mac = result.mac
-                        device.vendor = result.vendor
-                        found_devices[ip] = device
-        
-        # 6. 异步解析主机名（不阻塞扫描进度）
+        # 5. 解析主机名
         if found_devices:
             self._resolve_hostnames(list(found_devices.values()))
         
-        # 7. 设备指纹识别（应对随机MAC地址设备）
+        # 6. 设备指纹识别（应对随机MAC地址设备）
         if self.use_fingerprint and found_devices:
             self._fingerprint_devices(list(found_devices.values()))
         
