@@ -6,6 +6,14 @@
 
 ---
 
+## 下载使用
+
+1. 最新安装包请前往 Releases 下载：  
+   https://github.com/scl970211-prog/EcoMonitor/releases
+2. 下载后直接运行安装向导即可部署；安装过程中可选择是否安装 Npcap。
+
+---
+
 ## 功能特性
 
 1. **设备搜索** —— 局域网多协议设备扫描（ARP / Ping / TCP / ONVIF）。
